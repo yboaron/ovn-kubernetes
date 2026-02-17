@@ -1,0 +1,83 @@
+---
+# Example CUDN configuration for multi-cluster services with BGP EVPN
+# This CUDN should be created identically in all participating clusters
+
+# IMPORTANT:
+# - Same CUDN name across clusters (cudn_green)
+# - Same Route Target for EVPN (65000:100)
+# - Different subnet ranges per cluster to avoid overlap
+
+apiVersion: k8s.ovn.org/v1
+kind: ClusterUserDefinedNetwork
+metadata:
+  name: cudn_green
+spec:
+  # Namespace selector - determines which namespaces use this network
+  namespaceSelector:
+    matchLabels:
+      tenant: green
+
+  network:
+    # Layer3 topology for inter-cluster routing
+    topology: Layer3
+
+    # EVPN transport for BGP-based multi-cluster connectivity
+    transport: EVPN
+
+    # Layer3 configuration
+    layer3:
+      role: Primary
+      subnets:
+      - cidr: 10.50.0.0/16  # Cluster West
+      # - cidr: 10.51.0.0/16  # Cluster East (use different subnet per cluster)
+        hostSubnet: /24
+
+    # EVPN configuration
+    evpn:
+      # VTEP reference (must exist)
+      vtep: vtep-external
+
+      # IP-VRF for Layer3 routing
+      ipVRF:
+        vni: 10000
+        routeTarget: "65000:100"  # MUST match across all clusters
+
+---
+# Example namespace that will use this CUDN
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: backend
+  labels:
+    tenant: green  # Matches CUDN namespaceSelector
+
+---
+# Notes for multi-cluster setup:
+#
+# Cluster West (10.50.0.0/16):
+#   - ClusterUserDefinedNetwork: cudn_green
+#   - EVPN IP-VRF VNI: 10000
+#   - Route Target: 65000:100
+#   - BGP ASN: 65001
+#
+# Cluster East (10.51.0.0/16):
+#   - ClusterUserDefinedNetwork: cudn_green (same name!)
+#   - EVPN IP-VRF VNI: 10000 (same VNI!)
+#   - Route Target: 65000:100 (same RT!)
+#   - BGP ASN: 65002 (different ASN)
+#
+# BGP EVPN Requirements:
+#   1. BGP session established between clusters
+#   2. EVPN L2VPN address family enabled
+#   3. Route Targets match for same CUDN
+#   4. Pod IPs reachable via BGP Type-5 routes
+#
+# Verification:
+#   # Check BGP session
+#   kubectl exec -n kube-system frr-xxx -- vtysh -c "show bgp summary"
+#
+#   # Check EVPN routes
+#   kubectl exec -n kube-system frr-xxx -- vtysh -c "show bgp l2vpn evpn"
+#
+#   # Test pod-to-pod connectivity
+#   kubectl exec -n backend pod-west -- ping <pod-east-ip>

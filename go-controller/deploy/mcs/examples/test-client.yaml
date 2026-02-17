@@ -1,0 +1,42 @@
+---
+# Test client pod to verify multi-cluster service connectivity
+# Deploy this in a different cluster than where nginx is running
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+  labels:
+    tenant: green  # Same CUDN as exported service
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client
+  namespace: demo
+  labels:
+    app: test-client
+spec:
+  containers:
+  - name: client
+    image: nicolaka/netshoot:latest
+    command: ["sleep", "infinity"]
+    securityContext:
+      capabilities:
+        add: ["NET_ADMIN"]
+---
+# Instructions:
+# 1. Wait for ServiceImport to be created
+#    kubectl get serviceimport nginx -n demo
+#
+# 2. Get ClusterSetIP
+#    CLUSTERSETIP=$(kubectl get serviceimport nginx -n demo -o jsonpath='{.spec.ips[0]}')
+#
+# 3. Test connectivity from client pod
+#    kubectl exec -n demo test-client -- curl http://$CLUSTERSETIP
+#
+# 4. Or use DNS (if DNS integration is enabled)
+#    kubectl exec -n demo test-client -- curl http://nginx.demo.svc.clusterset.local
+#
+# 5. Verify OVN load balancer includes remote endpoints
+#    kubectl exec -n ovn-kubernetes ovnkube-master-xxx -- \
+#      ovn-nbctl list load_balancer | grep nginx

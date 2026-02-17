@@ -1,0 +1,52 @@
+---
+# ClusterRole for broker access
+# Grants member cluster agents access to broker resources
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ovn-mcs-broker-agent
+rules:
+# ClusterInfo - read all, write own
+- apiGroups: ["broker.ovn.org"]
+  resources: ["clusterinfos"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: ["broker.ovn.org"]
+  resources: ["clusterinfos/status"]
+  verbs: ["get", "update", "patch"]
+
+# ServiceExport - read all, write own
+- apiGroups: ["broker.ovn.org"]
+  resources: ["serviceexports"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["broker.ovn.org"]
+  resources: ["serviceexports/status"]
+  verbs: ["get", "update", "patch"]
+
+# ServiceImport - read all, write own
+- apiGroups: ["broker.ovn.org"]
+  resources: ["serviceimports"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["broker.ovn.org"]
+  resources: ["serviceimports/status"]
+  verbs: ["get", "update", "patch"]
+
+# Namespaces - needed to check if namespace exists before creating resources
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list", "watch", "create"]
+
+---
+# ClusterRoleBinding for broker access
+# Binds the ClusterRole to the ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ovn-mcs-broker-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ovn-mcs-broker-agent
+subjects:
+- kind: ServiceAccount
+  name: ovn-mcs-broker-agent
+  namespace: ovn-kubernetes-broker

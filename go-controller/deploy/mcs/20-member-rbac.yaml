@@ -1,0 +1,81 @@
+---
+# ServiceAccount for MCS controller in member clusters
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ovn-mcs-controller
+  namespace: ovn-kubernetes
+---
+# ClusterRole for MCS controller in member clusters
+# Grants access to local cluster resources
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ovn-mcs-controller
+rules:
+# Upstream MCS API - ServiceExport (watch for user-created exports)
+- apiGroups: ["multicluster.x-k8s.io"]
+  resources: ["serviceexports"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["multicluster.x-k8s.io"]
+  resources: ["serviceexports/status"]
+  verbs: ["get", "update", "patch"]
+
+# Upstream MCS API - ServiceImport (create for imported services)
+- apiGroups: ["multicluster.x-k8s.io"]
+  resources: ["serviceimports"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["multicluster.x-k8s.io"]
+  resources: ["serviceimports/status"]
+  verbs: ["get", "update", "patch"]
+
+# Services - read to get service details for exports
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list", "watch"]
+
+# EndpointSlices - read to collect endpoints, create for imports
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# Namespaces - read to determine CUDN for services
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list", "watch"]
+
+# CUDNs - read to determine network for services
+- apiGroups: ["k8s.ovn.org"]
+  resources: ["clusteruserdefinednetworks"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["k8s.ovn.org"]
+  resources: ["clusteruserdefinednetworks/status"]
+  verbs: ["get"]
+
+# UDNs - read for future namespace-scoped network support
+- apiGroups: ["k8s.ovn.org"]
+  resources: ["userdefinednetworks"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["k8s.ovn.org"]
+  resources: ["userdefinednetworks/status"]
+  verbs: ["get"]
+
+# Events - create events for status updates
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+
+---
+# ClusterRoleBinding for MCS controller
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ovn-mcs-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ovn-mcs-controller
+subjects:
+- kind: ServiceAccount
+  name: ovn-mcs-controller
+  namespace: ovn-kubernetes

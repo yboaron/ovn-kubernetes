@@ -1,0 +1,307 @@
+---
+# Broker CRDs - Custom OVN-Kubernetes multi-cluster resources
+# These CRDs are installed in the broker cluster only
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: clusterinfos.broker.ovn.org
+spec:
+  group: broker.ovn.org
+  names:
+    kind: ClusterInfo
+    listKind: ClusterInfoList
+    plural: clusterinfos
+    singular: clusterinfo
+  scope: Cluster
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        description: ClusterInfo represents a cluster participating in the multi-cluster broker.
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            required:
+            - clusterID
+            properties:
+              clusterID:
+                type: string
+                description: Unique identifier for this cluster
+              serviceCIDR:
+                type: array
+                items:
+                  type: string
+                description: Service CIDR range(s)
+              clusterCIDR:
+                type: array
+                items:
+                  type: string
+                description: Pod CIDR range(s) for default network
+              globalCIDR:
+                type: array
+                items:
+                  type: string
+                description: Global CIDR for Globalnet-style NAT
+              networks:
+                type: array
+                description: CUDN network information
+                items:
+                  type: object
+                  required:
+                  - name
+                  properties:
+                    name:
+                      type: string
+                    cidr:
+                      type: array
+                      items:
+                        type: string
+                    topology:
+                      type: string
+                      enum: [Layer2, Layer3, Localnet]
+                    transport:
+                      type: string
+                      enum: [NoOverlay, Geneve, EVPN]
+                    evpn:
+                      type: object
+                      properties:
+                        ipvrfVNI:
+                          type: integer
+                          format: int32
+                        ipvrfRouteTarget:
+                          type: string
+                        macvrfVNI:
+                          type: integer
+                          format: int32
+                        macvrfRouteTarget:
+                          type: string
+                        asn:
+                          type: integer
+                          format: int32
+          status:
+            type: object
+            properties:
+              conditions:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    status:
+                      type: string
+                    lastTransitionTime:
+                      type: string
+                      format: date-time
+                    reason:
+                      type: string
+                    message:
+                      type: string
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: serviceexports.broker.ovn.org
+spec:
+  group: broker.ovn.org
+  names:
+    kind: ServiceExport
+    listKind: ServiceExportList
+    plural: serviceexports
+    singular: serviceexport
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        description: ServiceExport represents a service exported to the broker.
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            required:
+            - serviceName
+            - serviceNamespace
+            properties:
+              serviceName:
+                type: string
+              serviceNamespace:
+                type: string
+              ports:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    protocol:
+                      type: string
+                    port:
+                      type: integer
+                      format: int32
+                    appProtocol:
+                      type: string
+          status:
+            type: object
+            properties:
+              clusterID:
+                type: string
+              networkName:
+                type: string
+                description: CUDN network name
+              clusterSetIP:
+                type: string
+                description: Allocated ClusterSet-scoped VIP
+              endpoints:
+                type: array
+                items:
+                  type: object
+                  required:
+                  - address
+                  properties:
+                    address:
+                      type: string
+                    hostname:
+                      type: string
+                    nodeName:
+                      type: string
+                    zone:
+                      type: string
+                    ready:
+                      type: boolean
+              conditions:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    status:
+                      type: string
+                    lastTransitionTime:
+                      type: string
+                      format: date-time
+                    reason:
+                      type: string
+                    message:
+                      type: string
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: serviceimports.broker.ovn.org
+spec:
+  group: broker.ovn.org
+  names:
+    kind: ServiceImport
+    listKind: ServiceImportList
+    plural: serviceimports
+    singular: serviceimport
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        description: ServiceImport represents an imported service.
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              type:
+                type: string
+                enum: [ClusterSetIP, Headless]
+              ips:
+                type: array
+                items:
+                  type: string
+              ports:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    protocol:
+                      type: string
+                    port:
+                      type: integer
+                      format: int32
+                    appProtocol:
+                      type: string
+              sessionAffinity:
+                type: string
+                enum: [None, ClientIP]
+              sessionAffinityConfig:
+                type: object
+                properties:
+                  clientIP:
+                    type: object
+                    properties:
+                      timeoutSeconds:
+                        type: integer
+                        format: int32
+          status:
+            type: object
+            properties:
+              networkName:
+                type: string
+              clusters:
+                type: array
+                items:
+                  type: object
+                  required:
+                  - clusterID
+                  properties:
+                    clusterID:
+                      type: string
+                    endpointCount:
+                      type: integer
+                      format: int32
+              conditions:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    status:
+                      type: string
+                    lastTransitionTime:
+                      type: string
+                      format: date-time
+                    reason:
+                      type: string
+                    message:
+                      type: string
+    subresources:
+      status: {}

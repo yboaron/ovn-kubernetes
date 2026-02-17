@@ -1,0 +1,53 @@
+---
+# Example: Export nginx service on CUDN network
+# This example assumes:
+# - CUDN "cudn_green" exists with label selector tenant=green
+# - BGP EVPN is configured for cudn_green between clusters
+
+# Create namespace with CUDN label
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+  labels:
+    tenant: green  # Matches CUDN selector
+---
+# Deploy nginx pod
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: demo
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+---
+# Create service
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  namespace: demo
+spec:
+  selector:
+    app: nginx
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+    protocol: TCP
+  type: ClusterIP
+---
+# Export the service for multi-cluster discovery
+apiVersion: multicluster.x-k8s.io/v1alpha1
+kind: ServiceExport
+metadata:
+  name: nginx
+  namespace: demo
+  labels:
+    example: multi-cluster-nginx

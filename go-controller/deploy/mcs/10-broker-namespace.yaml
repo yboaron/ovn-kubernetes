@@ -1,0 +1,17 @@
+---
+# Broker cluster namespace
+# All multi-cluster resources are stored here
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ovn-kubernetes-broker
+  labels:
+    app: ovn-kubernetes-broker
+---
+# ServiceAccount for broker access
+# Member cluster agents use this to access the broker
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ovn-mcs-broker-agent
+  namespace: ovn-kubernetes-broker
