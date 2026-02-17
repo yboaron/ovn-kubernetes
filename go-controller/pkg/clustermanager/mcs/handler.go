@@ -14,6 +14,7 @@ import (
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager/broker"
 	brokerv1alpha1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/ovnbroker/v1alpha1"
+	cudnlisters "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/listers/userdefinednetwork/v1"
 	mcsv1alpha1 "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
 )
 
@@ -33,15 +34,9 @@ type HandlerConfig struct {
 
 	// CUDNProvider provides CUDN network information
 	CUDNProvider CUDNProvider
-}
 
-// CUDNProvider provides information about CUDN networks.
-type CUDNProvider interface {
-	// GetCUDNForNamespace returns the CUDN name for a given namespace, or empty string if none.
-	GetCUDNForNamespace(namespace string) (string, error)
-
-	// HasCUDN checks if a CUDN with the given name exists in this cluster.
-	HasCUDN(name string) bool
+	// CUDNLister lists CUDNs in the local cluster (for provider creation)
+	CUDNLister cudnlisters.ClusterUserDefinedNetworkLister
 }
 
 // Handler implements broker.Handler for Multi-Cluster Services.
@@ -64,12 +59,19 @@ type Handler struct {
 func NewHandler(config *HandlerConfig) *Handler {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Create CUDN provider if not provided
+	cudnProvider := config.CUDNProvider
+	if cudnProvider == nil && config.CUDNLister != nil && config.NamespaceLister != nil {
+		cudnProvider = NewDefaultCUDNProvider(config.CUDNLister, config.NamespaceLister)
+		klog.V(2).Info("Created default CUDN provider for MCS handler")
+	}
+
 	h := &Handler{
 		agent:               config.Agent,
 		serviceLister:       config.ServiceLister,
 		endpointSliceLister: config.EndpointSliceLister,
 		namespaceLister:     config.NamespaceLister,
-		cudnProvider:        config.CUDNProvider,
+		cudnProvider:        cudnProvider,
 		ctx:                 ctx,
 		cancel:              cancel,
 	}
