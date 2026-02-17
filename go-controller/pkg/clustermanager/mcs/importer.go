@@ -9,6 +9,7 @@ import (
 	"k8s.io/klog/v2"
 
 	brokerv1alpha1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/ovnbroker/v1alpha1"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 )
 
 // Importer handles importing remote services from the broker.
@@ -157,16 +158,24 @@ func (i *Importer) ensureEndpointSlice(namespace, serviceName, sourceCluster str
 	}
 
 	// Create EndpointSlice
+	// NOTE: For CUDN services, we use different labels than default network services:
+	// - Label: types.LabelUserDefinedServiceName (not discoveryv1.LabelServiceName)
+	// - Annotation: types.UserDefinedNetworkEndpointSliceAnnotation (not label)
+	// This matches what the services controller expects for UDN/CUDN services.
 	slice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sliceName,
 			Namespace: namespace,
 			Labels: map[string]string{
-				discoveryv1.LabelServiceName:                  serviceName,
-				discoveryv1.LabelManagedBy:                    "ovn-k8s-mcs-controller",
-				"multicluster.kubernetes.io/service-name":     serviceName,
-				"multicluster.kubernetes.io/source-cluster":   sourceCluster,
-				"networking.k8s.ovn.org/network":              brokerExport.Status.NetworkName,
+				// Use UDN-specific label for CUDN services
+				types.LabelUserDefinedServiceName:           serviceName,
+				discoveryv1.LabelManagedBy:                  "ovn-k8s-mcs-controller",
+				"multicluster.kubernetes.io/service-name":   serviceName,
+				"multicluster.kubernetes.io/source-cluster": sourceCluster,
+			},
+			Annotations: map[string]string{
+				// Network name goes in annotation (not label) for CUDN services
+				types.UserDefinedNetworkEndpointSliceAnnotation: brokerExport.Status.NetworkName,
 			},
 		},
 		AddressType: discoveryv1.AddressTypeIPv4,
