@@ -1,0 +1,251 @@
+package mcs
+
+import (
+	"context"
+	"fmt"
+	"sync"
+
+	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	corev1listers "k8s.io/client-go/listers/core/v1"
+	discoverylisters "k8s.io/client-go/listers/discovery/v1"
+	"k8s.io/klog/v2"
+
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager/broker"
+	brokerv1alpha1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/ovnbroker/v1alpha1"
+	mcsv1alpha1 "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
+)
+
+// HandlerConfig contains the configuration for the MCS handler.
+type HandlerConfig struct {
+	// Agent is the broker agent
+	Agent *broker.Agent
+
+	// ServiceLister lists services in the local cluster
+	ServiceLister corev1listers.ServiceLister
+
+	// EndpointSliceLister lists endpoint slices in the local cluster
+	EndpointSliceLister discoverylisters.EndpointSliceLister
+
+	// NamespaceLister lists namespaces in the local cluster
+	NamespaceLister corev1listers.NamespaceLister
+
+	// CUDNProvider provides CUDN network information
+	CUDNProvider CUDNProvider
+}
+
+// CUDNProvider provides information about CUDN networks.
+type CUDNProvider interface {
+	// GetCUDNForNamespace returns the CUDN name for a given namespace, or empty string if none.
+	GetCUDNForNamespace(namespace string) (string, error)
+
+	// HasCUDN checks if a CUDN with the given name exists in this cluster.
+	HasCUDN(name string) bool
+}
+
+// Handler implements broker.Handler for Multi-Cluster Services.
+type Handler struct {
+	agent               *broker.Agent
+	serviceLister       corev1listers.ServiceLister
+	endpointSliceLister discoverylisters.EndpointSliceLister
+	namespaceLister     corev1listers.NamespaceLister
+	cudnProvider        CUDNProvider
+
+	exporter *Exporter
+	importer *Importer
+
+	ctx    context.Context
+	cancel context.CancelFunc
+	mu     sync.Mutex
+}
+
+// NewHandler creates a new MCS handler.
+func NewHandler(config *HandlerConfig) *Handler {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	h := &Handler{
+		agent:               config.Agent,
+		serviceLister:       config.ServiceLister,
+		endpointSliceLister: config.EndpointSliceLister,
+		namespaceLister:     config.NamespaceLister,
+		cudnProvider:        config.CUDNProvider,
+		ctx:                 ctx,
+		cancel:              cancel,
+	}
+
+	// Create exporter and importer
+	h.exporter = NewExporter(h)
+	h.importer = NewImporter(h)
+
+	return h
+}
+
+// Name implements broker.Handler
+func (h *Handler) Name() string {
+	return "MCS"
+}
+
+// GetWatchedResources implements broker.Handler
+func (h *Handler) GetWatchedResources() []broker.WatchedResource {
+	return []broker.WatchedResource{
+		{
+			// Watch local ServiceExport (upstream MCS API)
+			GroupVersionKind: schema.GroupVersionKind{
+				Group:   mcsv1alpha1.GroupName,
+				Version: mcsv1alpha1.GroupVersion,
+				Kind:    "ServiceExport",
+			},
+			Local:  true,
+			Broker: false,
+		},
+		{
+			// Watch broker ServiceExport (our custom CRD)
+			GroupVersionKind: schema.GroupVersionKind{
+				Group:   brokerv1alpha1.GroupName,
+				Version: brokerv1alpha1.Version,
+				Kind:    "ServiceExport",
+			},
+			Local:  false,
+			Broker: true,
+		},
+	}
+}
+
+// OnLocalAdd implements broker.Handler - handles local ServiceExport creation
+func (h *Handler) OnLocalAdd(obj interface{}) error {
+	export, ok := obj.(*mcsv1alpha1.ServiceExport)
+	if !ok {
+		return nil
+	}
+
+	klog.V(4).Infof("MCS handler: ServiceExport added: %s/%s", export.Namespace, export.Name)
+	return h.exporter.ExportService(export)
+}
+
+// OnLocalUpdate implements broker.Handler - handles local ServiceExport updates
+func (h *Handler) OnLocalUpdate(oldObj, newObj interface{}) error {
+	export, ok := newObj.(*mcsv1alpha1.ServiceExport)
+	if !ok {
+		return nil
+	}
+
+	klog.V(4).Infof("MCS handler: ServiceExport updated: %s/%s", export.Namespace, export.Name)
+	return h.exporter.ExportService(export)
+}
+
+// OnLocalDelete implements broker.Handler - handles local ServiceExport deletion
+func (h *Handler) OnLocalDelete(obj interface{}) error {
+	export, ok := obj.(*mcsv1alpha1.ServiceExport)
+	if !ok {
+		return nil
+	}
+
+	klog.V(4).Infof("MCS handler: ServiceExport deleted: %s/%s", export.Namespace, export.Name)
+	return h.exporter.UnexportService(export)
+}
+
+// OnBrokerAdd implements broker.Handler - handles broker ServiceExport from other clusters
+func (h *Handler) OnBrokerAdd(obj interface{}) error {
+	export, ok := obj.(*brokerv1alpha1.ServiceExport)
+	if !ok {
+		return nil
+	}
+
+	// Skip our own exports
+	if export.Status.ClusterID == h.agent.ClusterID() {
+		klog.V(5).Infof("Skipping own ServiceExport: %s", export.Name)
+		return nil
+	}
+
+	// Check if we have a matching CUDN
+	if !h.cudnProvider.HasCUDN(export.Status.NetworkName) {
+		klog.V(5).Infof("Skipping ServiceExport %s - no matching CUDN %s", export.Name, export.Status.NetworkName)
+		return nil
+	}
+
+	klog.V(4).Infof("MCS handler: Broker ServiceExport added from cluster %s: %s (network: %s)",
+		export.Status.ClusterID, export.Name, export.Status.NetworkName)
+	return h.importer.ImportService(export)
+}
+
+// OnBrokerUpdate implements broker.Handler
+func (h *Handler) OnBrokerUpdate(oldObj, newObj interface{}) error {
+	return h.OnBrokerAdd(newObj)
+}
+
+// OnBrokerDelete implements broker.Handler
+func (h *Handler) OnBrokerDelete(obj interface{}) error {
+	export, ok := obj.(*brokerv1alpha1.ServiceExport)
+	if !ok {
+		return nil
+	}
+
+	// Skip our own exports
+	if export.Status.ClusterID == h.agent.ClusterID() {
+		return nil
+	}
+
+	klog.V(4).Infof("MCS handler: Broker ServiceExport deleted from cluster %s: %s",
+		export.Status.ClusterID, export.Name)
+	return h.importer.UnimportService(export)
+}
+
+// Start implements broker.Handler
+func (h *Handler) Start(ctx context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	klog.V(2).Info("Starting MCS handler")
+
+	// Start exporter and importer background workers if needed
+	// For now, they work synchronously via broker callbacks
+
+	return nil
+}
+
+// Stop implements broker.Handler
+func (h *Handler) Stop() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	klog.V(2).Info("Stopping MCS handler")
+	h.cancel()
+}
+
+// Helper method to get service by namespace and name
+func (h *Handler) getService(namespace, name string) (*corev1.Service, error) {
+	svc, err := h.serviceLister.Services(namespace).Get(name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get service %s/%s: %w", namespace, name, err)
+	}
+	return svc, nil
+}
+
+// Helper method to get namespace
+func (h *Handler) getNamespace(name string) (*corev1.Namespace, error) {
+	ns, err := h.namespaceLister.Get(name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get namespace %s: %w", name, err)
+	}
+	return ns, nil
+}
+
+// Helper method to list endpoint slices for a service
+func (h *Handler) listEndpointSlices(namespace, serviceName string) ([]*discoveryv1.EndpointSlice, error) {
+	// In real implementation, would use label selector
+	// For now, simplified version
+	allSlices, err := h.endpointSliceLister.EndpointSlices(namespace).List(nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var slices []*discoveryv1.EndpointSlice
+	for _, slice := range allSlices {
+		if slice.Labels[discoveryv1.LabelServiceName] == serviceName {
+			slices = append(slices, slice)
+		}
+	}
+
+	return slices, nil
+}
