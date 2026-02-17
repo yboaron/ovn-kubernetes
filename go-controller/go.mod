@@ -69,6 +69,7 @@ require (
 	kubevirt.io/api v1.0.0-alpha.0
 	sigs.k8s.io/controller-runtime v0.22.1
 	sigs.k8s.io/knftables v0.0.19
+	sigs.k8s.io/mcs-api v0.1.0
 	sigs.k8s.io/network-policy-api v0.1.5
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0
 	sigs.k8s.io/yaml v1.6.0
@@ -158,7 +159,6 @@ require (
 	kubevirt.io/containerized-data-importer-api v1.55.0 // indirect
 	kubevirt.io/controller-lifecycle-operator-sdk/api v0.0.0-20220329064328-f3cc58c6ed90 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
-	sigs.k8s.io/mcs-api v0.1.0 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 )
 

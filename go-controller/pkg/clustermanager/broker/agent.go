@@ -17,6 +17,9 @@ type AgentConfig struct {
 	// ClusterID is the unique identifier for this cluster
 	ClusterID string
 
+	// LocalKubeConfig is the kubeconfig for the local cluster
+	LocalKubeConfig *rest.Config
+
 	// BrokerKubeConfig is the kubeconfig for accessing the broker cluster
 	BrokerKubeConfig *rest.Config
 
@@ -48,6 +51,7 @@ type Agent struct {
 	config       *AgentConfig
 	brokerClient *Client
 	handlers     []Handler
+	syncer       *Syncer
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -132,13 +136,23 @@ func (a *Agent) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to publish cluster info: %w", err)
 	}
 
-	// 2. Start all handlers
+	// 2. Create syncer
+	syncer, err := NewSyncer(a, a.handlers)
+	if err != nil {
+		return fmt.Errorf("failed to create syncer: %w", err)
+	}
+	a.syncer = syncer
+
+	// 3. Start all handlers
 	for _, handler := range a.handlers {
 		klog.V(2).Infof("Starting handler: %s", handler.Name())
 		if err := handler.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start handler %s: %w", handler.Name(), err)
 		}
 	}
+
+	// 4. Start syncer (informers and workers)
+	a.syncer.Start(ctx)
 
 	a.started = true
 	klog.Infof("Broker agent started successfully with %d handlers", len(a.handlers))
@@ -155,6 +169,11 @@ func (a *Agent) Stop() {
 	}
 
 	klog.Infof("Stopping broker agent for cluster %s", a.config.ClusterID)
+
+	// Stop syncer first
+	if a.syncer != nil {
+		a.syncer.Stop()
+	}
 
 	// Stop all handlers
 	for _, handler := range a.handlers {
