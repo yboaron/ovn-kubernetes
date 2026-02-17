@@ -92,8 +92,8 @@ func (h *Handler) GetWatchedResources() []broker.WatchedResource {
 		{
 			// Watch local ServiceExport (upstream MCS API)
 			GroupVersionKind: schema.GroupVersionKind{
-				Group:   mcsv1alpha1.GroupName,
-				Version: mcsv1alpha1.GroupVersion,
+				Group:   "multicluster.x-k8s.io",
+				Version: "v1alpha1",
 				Kind:    "ServiceExport",
 			},
 			Local:  true,

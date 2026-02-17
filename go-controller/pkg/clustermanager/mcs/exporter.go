@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 
@@ -117,9 +119,9 @@ func (e *Exporter) UnexportService(export *mcsv1alpha1.ServiceExport) error {
 }
 
 // collectEndpoints gathers CUDN-specific pod IPs from EndpointSlices.
-func (e *Exporter) collectEndpoints(svc *metav1.Object, cudnName string) ([]brokerv1alpha1.EndpointInfo, error) {
+func (e *Exporter) collectEndpoints(svc *corev1.Service, cudnName string) ([]brokerv1alpha1.EndpointInfo, error) {
 	// List all EndpointSlices for this service
-	slices, err := e.handler.listEndpointSlices(svc.GetNamespace(), svc.GetName())
+	slices, err := e.handler.listEndpointSlices(svc.Namespace, svc.Name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list endpoint slices: %w", err)
 	}
@@ -175,8 +177,21 @@ func (e *Exporter) collectEndpoints(svc *metav1.Object, cudnName string) ([]brok
 }
 
 // convertServicePorts converts corev1.ServicePort to discoveryv1.EndpointPort.
-func (e *Exporter) convertServicePorts(svc *metav1.Object) []discoveryv1.EndpointPort {
-	// Note: In a real implementation, we'd need the actual Service object
-	// For now, returning empty array - will be filled by actual service controller
-	return []discoveryv1.EndpointPort{}
+func (e *Exporter) convertServicePorts(svc *corev1.Service) []discoveryv1.EndpointPort {
+	ports := []discoveryv1.EndpointPort{}
+	for _, p := range svc.Spec.Ports {
+		port := int32(p.Port)
+		protocol := p.Protocol
+		portName := p.Name
+
+		epPort := discoveryv1.EndpointPort{
+			Port:     &port,
+			Protocol: &protocol,
+		}
+		if portName != "" {
+			epPort.Name = &portName
+		}
+		ports = append(ports, epPort)
+	}
+	return ports
 }
