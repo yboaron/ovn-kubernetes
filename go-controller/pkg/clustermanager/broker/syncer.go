@@ -352,7 +352,7 @@ func (s *Syncer) runWorker(ctx context.Context, queueName string, queue workqueu
 
 // processQueueItem dispatches an event to the appropriate handler method.
 func (s *Syncer) processQueueItem(item *queueItem) error {
-	klog.V(5).Infof("Processing %s event for %s (local: %v, handler: %s)",
+	klog.Infof("[SYNCER-DEBUG] Processing %s event for %s (local: %v, handler: %s)",
 		item.eventType, item.gvr.String(), item.isLocal, item.handler.Name())
 
 	var err error
@@ -361,7 +361,9 @@ func (s *Syncer) processQueueItem(item *queueItem) error {
 		// Local cluster events
 		switch item.eventType {
 		case "add":
+			klog.Infof("[SYNCER-DEBUG] About to call OnLocalAdd, obj type: %T", item.newObj)
 			err = item.handler.OnLocalAdd(item.newObj)
+			klog.Infof("[SYNCER-DEBUG] OnLocalAdd returned, err: %v", err)
 		case "update":
 			err = item.handler.OnLocalUpdate(item.oldObj, item.newObj)
 		case "delete":

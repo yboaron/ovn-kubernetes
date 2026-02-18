@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/klog/v2"
 
 	brokerv1alpha1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/ovnbroker/v1alpha1"
@@ -39,7 +41,13 @@ func (i *Importer) ImportService(brokerExport *brokerv1alpha1.ServiceExport) err
 		return err
 	}
 
-	// 2. Create or update EndpointSlice for this source cluster
+	// 2. Create or update derived Service for the imported service
+	if err := i.ensureService(namespace, serviceName, brokerExport); err != nil {
+		klog.Errorf("Failed to ensure Service: %v", err)
+		return err
+	}
+
+	// 3. Create or update EndpointSlice for this source cluster
 	if err := i.ensureEndpointSlice(namespace, serviceName, sourceCluster, brokerExport); err != nil {
 		klog.Errorf("Failed to ensure EndpointSlice: %v", err)
 		return err
@@ -68,8 +76,21 @@ func (i *Importer) UnimportService(brokerExport *brokerv1alpha1.ServiceExport) e
 		klog.Warningf("Failed to delete EndpointSlice %s/%s: %v", namespace, sliceName, err)
 	}
 
-	// TODO: Check if we should delete ServiceImport (only if no more remote clusters exporting)
-	// For now, leaving ServiceImport in place
+	// Check if we should delete Service and ServiceImport (only if no more remote clusters exporting)
+	// List all EndpointSlices for this service to see if any remain
+	remainingSlices, err := i.handler.listEndpointSlices(namespace, serviceName)
+	if err != nil {
+		klog.Warningf("Failed to list EndpointSlices for service %s/%s: %v", namespace, serviceName, err)
+	} else if len(remainingSlices) == 0 {
+		// No more EndpointSlices, delete the Service
+		err = i.handler.agent.LocalKubeClient().CoreV1().Services(namespace).Delete(
+			context.TODO(), serviceName, metav1.DeleteOptions{})
+		if err != nil {
+			klog.Warningf("Failed to delete Service %s/%s: %v", namespace, serviceName, err)
+		} else {
+			klog.Infof("Deleted Service %s/%s (no more remote endpoints)", namespace, serviceName)
+		}
+	}
 
 	klog.Infof("Successfully unimported service %s/%s from cluster %s", namespace, serviceName, sourceCluster)
 	return nil
@@ -101,27 +122,133 @@ func (i *Importer) ensureServiceImport(namespace, serviceName string, brokerExpo
 		serviceImport.Spec.IPs = []string{brokerExport.Status.ClusterSetIP}
 	}
 
-	// Try to get existing ServiceImport
-	existing, err := i.handler.agent.BrokerClient().BrokerClient().BrokerV1alpha1().
+	// Try to get existing ServiceImport (in local cluster)
+	existing, err := i.handler.agent.LocalBrokerClient().BrokerV1alpha1().
 		ServiceImports(namespace).Get(context.TODO(), serviceName, metav1.GetOptions{})
 
 	if err == nil {
-		// Update existing
+		// Update existing - need to update spec and status separately
 		serviceImport.ResourceVersion = existing.ResourceVersion
-		_, err = i.handler.agent.BrokerClient().BrokerClient().BrokerV1alpha1().
+
+		// Update spec
+		updated, err := i.handler.agent.LocalBrokerClient().BrokerV1alpha1().
 			ServiceImports(namespace).Update(context.TODO(), serviceImport, metav1.UpdateOptions{})
 		if err != nil {
-			return fmt.Errorf("failed to update ServiceImport: %w", err)
+			return fmt.Errorf("failed to update ServiceImport spec: %w", err)
 		}
+
+		// Update status
+		serviceImport.ResourceVersion = updated.ResourceVersion
+		_, err = i.handler.agent.LocalBrokerClient().BrokerV1alpha1().
+			ServiceImports(namespace).UpdateStatus(context.TODO(), serviceImport, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to update ServiceImport status: %w", err)
+		}
+
 		klog.V(4).Infof("Updated ServiceImport %s/%s", namespace, serviceName)
 	} else {
 		// Create new
-		_, err = i.handler.agent.BrokerClient().BrokerClient().BrokerV1alpha1().
+		created, err := i.handler.agent.LocalBrokerClient().BrokerV1alpha1().
 			ServiceImports(namespace).Create(context.TODO(), serviceImport, metav1.CreateOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to create ServiceImport: %w", err)
 		}
+
+		// Update status after creation
+		serviceImport.ResourceVersion = created.ResourceVersion
+		_, err = i.handler.agent.LocalBrokerClient().BrokerV1alpha1().
+			ServiceImports(namespace).UpdateStatus(context.TODO(), serviceImport, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to update ServiceImport status after creation: %w", err)
+		}
+
 		klog.V(4).Infof("Created ServiceImport %s/%s", namespace, serviceName)
+	}
+
+	return nil
+}
+
+// ensureService creates or updates a derived Service for the imported service.
+// This Service is required for OVN-K's service controller to create load balancer backends.
+func (i *Importer) ensureService(namespace, serviceName string, brokerExport *brokerv1alpha1.ServiceExport) error {
+	// Convert broker ports to Service ports
+	var servicePorts []corev1.ServicePort
+	for _, epPort := range brokerExport.Spec.Ports {
+		svcPort := corev1.ServicePort{
+			Protocol: *epPort.Protocol,
+			Port:     *epPort.Port,
+		}
+		if epPort.Name != nil {
+			svcPort.Name = *epPort.Name
+		}
+		// For imported services, we use the same port as target port
+		svcPort.TargetPort = intstr.FromInt(int(*epPort.Port))
+		servicePorts = append(servicePorts, svcPort)
+	}
+
+	// Create Service without selector (endpoints come from EndpointSlices)
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      serviceName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"multicluster.kubernetes.io/service-name":   serviceName,
+				"multicluster.kubernetes.io/imported":       "true",
+				"networking.k8s.ovn.org/network":            brokerExport.Status.NetworkName,
+			},
+			Annotations: map[string]string{
+				"multicluster.kubernetes.io/source-cluster": brokerExport.Status.ClusterID,
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Type:  corev1.ServiceTypeClusterIP,
+			Ports: servicePorts,
+			// No selector - endpoints come from manually created EndpointSlices
+		},
+	}
+
+	// IMPORTANT: Store ClusterSetIP in annotation instead of Service.Spec.ClusterIP
+	// The ClusterSetIP is managed separately and OVN will create LB rules for it
+	if brokerExport.Status.ClusterSetIP != "" {
+		if service.Annotations == nil {
+			service.Annotations = make(map[string]string)
+		}
+		service.Annotations["multicluster.kubernetes.io/clusterset-ip"] = brokerExport.Status.ClusterSetIP
+		klog.Infof("Set ClusterSetIP annotation %s for imported service %s/%s",
+			brokerExport.Status.ClusterSetIP, namespace, serviceName)
+	} else {
+		klog.Warningf("No ClusterSetIP allocated for service %s/%s",
+			namespace, serviceName)
+	}
+	// Let Kubernetes assign a regular ClusterIP from the service CIDR
+	// service.Spec.ClusterIP remains unset (will be auto-assigned)
+
+	// Try to get existing Service
+	existing, err := i.handler.agent.LocalKubeClient().CoreV1().Services(namespace).Get(
+		context.TODO(), serviceName, metav1.GetOptions{})
+
+	if err == nil {
+		// Update existing Service
+		// Preserve ResourceVersion and ClusterIP (don't change ClusterIP once assigned)
+		service.ResourceVersion = existing.ResourceVersion
+		service.Spec.ClusterIP = existing.Spec.ClusterIP
+		service.Spec.ClusterIPs = existing.Spec.ClusterIPs
+		_, err = i.handler.agent.LocalKubeClient().CoreV1().Services(namespace).Update(
+			context.TODO(), service, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to update Service: %w", err)
+		}
+		klog.V(4).Infof("Updated Service %s/%s for imported service (ClusterSetIP annotation: %s)",
+			namespace, serviceName, service.Annotations["multicluster.kubernetes.io/clusterset-ip"])
+	} else {
+		// Create new Service (Kubernetes will auto-assign ClusterIP)
+		_, err = i.handler.agent.LocalKubeClient().CoreV1().Services(namespace).Create(
+			context.TODO(), service, metav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to create Service: %w", err)
+		}
+		klog.Infof("Created Service %s/%s for imported service (ClusterSetIP annotation: %s)",
+			namespace, serviceName, service.Annotations["multicluster.kubernetes.io/clusterset-ip"])
 	}
 
 	return nil
@@ -160,7 +287,7 @@ func (i *Importer) ensureEndpointSlice(namespace, serviceName, sourceCluster str
 	// Create EndpointSlice
 	// NOTE: For CUDN services, we use different labels than default network services:
 	// - Label: types.LabelUserDefinedServiceName (not discoveryv1.LabelServiceName)
-	// - Annotation: types.UserDefinedNetworkEndpointSliceAnnotation (not label)
+	// - Annotation: types.UserDefinedNetworkEndpointSliceAnnotation with format cluster_udn_<networkname>
 	// This matches what the services controller expects for UDN/CUDN services.
 	slice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
@@ -175,7 +302,8 @@ func (i *Importer) ensureEndpointSlice(namespace, serviceName, sourceCluster str
 			},
 			Annotations: map[string]string{
 				// Network name goes in annotation (not label) for CUDN services
-				types.UserDefinedNetworkEndpointSliceAnnotation: brokerExport.Status.NetworkName,
+				// Format: cluster_udn_<networkname>
+				types.UserDefinedNetworkEndpointSliceAnnotation: fmt.Sprintf("cluster_udn_%s", brokerExport.Status.NetworkName),
 			},
 		},
 		AddressType: discoveryv1.AddressTypeIPv4,

@@ -130,11 +130,14 @@ func (e *Exporter) collectEndpoints(svc *corev1.Service, cudnName string) ([]bro
 
 	for _, slice := range slices {
 		// Only collect from mirrored EndpointSlices for this CUDN
-		// Mirrored slices have the network label
-		networkLabel, hasLabel := slice.Labels["networking.k8s.ovn.org/network"]
-		if !hasLabel || networkLabel != cudnName {
-			klog.V(5).Infof("Skipping EndpointSlice %s/%s - not for network %s (has label: %v, label value: %s)",
-				slice.Namespace, slice.Name, cudnName, hasLabel, networkLabel)
+		// Mirrored slices have the network in annotation "k8s.ovn.org/endpointslice-network"
+		// with format "cluster_udn_<networkname>"
+		networkAnnotation, hasAnnotation := slice.Annotations["k8s.ovn.org/endpointslice-network"]
+		expectedNetwork := fmt.Sprintf("cluster_udn_%s", cudnName)
+
+		if !hasAnnotation || networkAnnotation != expectedNetwork {
+			klog.V(5).Infof("Skipping EndpointSlice %s/%s - not for network %s (has annotation: %v, annotation value: %s, expected: %s)",
+				slice.Namespace, slice.Name, cudnName, hasAnnotation, networkAnnotation, expectedNetwork)
 			continue
 		}
 

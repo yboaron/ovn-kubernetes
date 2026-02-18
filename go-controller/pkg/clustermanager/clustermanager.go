@@ -65,6 +65,9 @@ type ClusterManager struct {
 	networkManager networkmanager.Controller
 
 	raController *routeadvertisements.Controller
+
+	// mcsController handles Multi-Cluster Services
+	mcsController *MCSController
 }
 
 // NewClusterManager creates a new cluster manager to manage the cluster nodes.
@@ -190,6 +193,12 @@ func NewClusterManager(
 		cm.raController = routeadvertisements.NewController(cm.networkManager.Interface(), wf, ovnClient)
 	}
 
+	// Initialize MCS controller if enabled
+	cm.mcsController, err = NewMCSController(ovnClient, wf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create MCS controller: %w", err)
+	}
+
 	return cm, nil
 }
 
@@ -260,6 +269,12 @@ func (cm *ClusterManager) Start(ctx context.Context) error {
 			return err
 		}
 	}
+
+	// Start MCS controller if enabled
+	if err := cm.mcsController.Start(ctx); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -292,6 +307,9 @@ func (cm *ClusterManager) Stop() {
 		cm.raController.Stop()
 		cm.raController = nil
 	}
+
+	// Stop MCS controller
+	cm.mcsController.Stop()
 }
 
 func (cm *ClusterManager) NewNetworkController(netInfo util.NetInfo) (networkmanager.NetworkController, error) {

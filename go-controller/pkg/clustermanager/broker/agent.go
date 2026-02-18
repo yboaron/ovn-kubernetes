@@ -10,6 +10,7 @@ import (
 	"k8s.io/klog/v2"
 
 	brokerv1alpha1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/ovnbroker/v1alpha1"
+	brokerclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/ovnbroker/v1alpha1/apis/clientset/versioned"
 )
 
 // AgentConfig contains the configuration for the broker agent.
@@ -31,6 +32,10 @@ type AgentConfig struct {
 
 	// ClusterInfoProvider provides cluster-level information
 	ClusterInfoProvider ClusterInfoProvider
+
+	// ClusterSetIPCIDR is the CIDR range for ClusterSet-scoped IPs (optional)
+	// If set, this cluster will act as the ClusterSetIP allocator
+	ClusterSetIPCIDR string
 }
 
 // ClusterInfoProvider provides cluster-level information for publishing to the broker.
@@ -48,10 +53,11 @@ type ClusterInfoProvider interface {
 // Agent is the generic broker agent that syncs data between local cluster and broker.
 // It provides a framework for pluggable handlers (MCS, Network, etc.)
 type Agent struct {
-	config       *AgentConfig
-	brokerClient *Client
-	handlers     []Handler
-	syncer       *Syncer
+	config            *AgentConfig
+	brokerClient      *Client
+	localBrokerClient brokerclientset.Interface
+	handlers          []Handler
+	syncer            *Syncer
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -80,14 +86,30 @@ func NewAgent(config *AgentConfig) (*Agent, error) {
 		return nil, fmt.Errorf("failed to create broker client: %w", err)
 	}
 
+	// Create local broker clientset for creating ServiceImports, etc. in local cluster
+	localBrokerClient, err := brokerclientset.NewForConfig(config.LocalKubeConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create local broker clientset: %w", err)
+	}
+
+	// Create ClusterSetIP allocator if CIDR is provided
+	// This cluster will act as the ClusterSetIP allocator for the broker
+	if config.ClusterSetIPCIDR != "" {
+		// Import mcs package to create allocator
+		// We'll add this in a separate package to avoid circular dependency
+		klog.Infof("Broker cluster will allocate ClusterSetIPs from CIDR: %s", config.ClusterSetIPCIDR)
+		// The allocator will be created and set by the MCS handler
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Agent{
-		config:       config,
-		brokerClient: brokerClient,
-		handlers:     []Handler{},
-		ctx:          ctx,
-		cancel:       cancel,
+		config:            config,
+		brokerClient:      brokerClient,
+		localBrokerClient: localBrokerClient,
+		handlers:          []Handler{},
+		ctx:               ctx,
+		cancel:            cancel,
 	}, nil
 }
 
@@ -115,9 +137,19 @@ func (a *Agent) LocalKubeClient() kubernetes.Interface {
 	return a.config.LocalKubeClient
 }
 
+// LocalBrokerClient returns the local broker CRD clientset.
+func (a *Agent) LocalBrokerClient() brokerclientset.Interface {
+	return a.localBrokerClient
+}
+
 // ClusterID returns the cluster identifier.
 func (a *Agent) ClusterID() string {
 	return a.config.ClusterID
+}
+
+// ClusterSetIPCIDR returns the ClusterSetIP CIDR configuration.
+func (a *Agent) ClusterSetIPCIDR() string {
+	return a.config.ClusterSetIPCIDR
 }
 
 // Start starts the broker agent and all registered handlers.

@@ -381,6 +381,9 @@ func (c *Controller) syncService(key string) error {
 	klog.V(5).Infof("Processing sync for service %s/%s for network=%s", namespace, name, c.netInfo.GetNetworkName())
 	metrics.MetricSyncServiceCount.Inc()
 
+	// Check if this is an MCS-imported service - log at Info level for visibility
+	isMCS := false
+
 	defer func() {
 		klog.V(5).Infof("Finished syncing service %s on namespace %s for network=%s : %v", name, namespace, c.netInfo.GetNetworkName(), time.Since(startTime))
 		metrics.MetricSyncServiceLatency.Observe(time.Since(startTime).Seconds())
@@ -458,9 +461,25 @@ func (c *Controller) syncService(key string) error {
 	// The Service exists in the cache: update it in OVN
 	klog.V(5).Infof("Service %s/%s retrieved from lister for network=%s: %v", service.Namespace, service.Name, c.netInfo.GetNetworkName(), service)
 
+	// Check if this is an MCS-imported service
+	isMCS = isMCSImportedService(service)
+	if isMCS {
+		klog.Infof("Processing MCS-imported service %s/%s for network=%s", service.Namespace, service.Name, c.netInfo.GetNetworkName())
+	}
+
 	endpointSlices, err := util.GetServiceEndpointSlices(namespace, service.Name, c.netInfo.GetNetworkName(), c.endpointSliceLister)
 	if err != nil {
 		return fmt.Errorf("service %s/%s for network=%s, %w", service.Namespace, service.Name, c.netInfo.GetNetworkName(), err)
+	}
+
+	if isMCS {
+		klog.Infof("MCS service %s/%s has %d endpoint slices", service.Namespace, service.Name, len(endpointSlices))
+		for i, eps := range endpointSlices {
+			klog.Infof("  EndpointSlice %d: %s, endpoints: %d", i, eps.Name, len(eps.Endpoints))
+			for j, ep := range eps.Endpoints {
+				klog.Infof("    Endpoint %d: addresses=%v, ready=%v", j, ep.Addresses, ep.Conditions.Ready)
+			}
+		}
 	}
 
 	// Build the abstract LB configs for this service
@@ -468,6 +487,13 @@ func (c *Controller) syncService(key string) error {
 	klog.V(5).Infof("Built service %s LB cluster-wide configs for network=%s: %#v", key, c.netInfo.GetNetworkName(), clusterConfigs)
 	klog.V(5).Infof("Built service %s LB per-node configs for network=%s:  %#v", key, c.netInfo.GetNetworkName(), perNodeConfigs)
 	klog.V(5).Infof("Built service %s LB template configs for network=%s: %#v", key, c.netInfo.GetNetworkName(), templateConfigs)
+
+	if isMCS {
+		klog.Infof("MCS service %s/%s built %d cluster configs", service.Namespace, service.Name, len(clusterConfigs))
+		for i, cfg := range clusterConfigs {
+			klog.Infof("  Config %d: vips=%v, clusterEndpoints=%v", i, cfg.vips, cfg.clusterEndpoints)
+		}
+	}
 
 	// Convert the LB configs in to load-balancer objects
 	clusterLBs := buildClusterLBs(service, clusterConfigs, c.nodeInfos, c.useLBGroups, c.netInfo)
@@ -879,4 +905,13 @@ func newRatelimiter(qps int) workqueue.TypedRateLimiter[string] {
 		workqueue.NewTypedItemExponentialFailureRateLimiter[string](5*time.Millisecond, 1000*time.Second),
 		&workqueue.TypedBucketRateLimiter[string]{Limiter: rate.NewLimiter(rate.Limit(qps), qps*5)},
 	)
+}
+
+// isMCSImportedService checks if a service is imported from another cluster via MCS.
+// MCS-imported services have the "multicluster.kubernetes.io/imported" label set to "true".
+func isMCSImportedService(service *corev1.Service) bool {
+	if service == nil || service.Labels == nil {
+		return false
+	}
+	return service.Labels["multicluster.kubernetes.io/imported"] == "true"
 }

@@ -32,6 +32,16 @@ type Client struct {
 
 	// brokerClient is the typed client for broker CRDs
 	brokerClient brokerclientset.Interface
+
+	// clusterSetIPAllocator allocates ClusterSet-scoped IPs (optional, only used in broker)
+	clusterSetIPAllocator ClusterSetIPAllocator
+}
+
+// ClusterSetIPAllocator is an interface for allocating ClusterSet IPs.
+type ClusterSetIPAllocator interface {
+	AllocateIP(namespace, name string) (string, error)
+	ReleaseIP(namespace, name string)
+	GetIP(namespace, name string) (string, bool)
 }
 
 // NewClient creates a new broker client.
@@ -56,6 +66,12 @@ func NewClient(config *rest.Config, clusterID, namespace string) (*Client, error
 		kubeClient:   kubeClient,
 		brokerClient: brokerClient,
 	}, nil
+}
+
+// SetClusterSetIPAllocator sets the ClusterSetIP allocator for this client.
+// This should only be called on the broker cluster.
+func (c *Client) SetClusterSetIPAllocator(allocator ClusterSetIPAllocator) {
+	c.clusterSetIPAllocator = allocator
 }
 
 // ClusterID returns the cluster identifier.
@@ -118,24 +134,65 @@ func (c *Client) CreateOrUpdateServiceExport(ctx context.Context, export *broker
 	// Ensure cluster ID is set in status
 	export.Status.ClusterID = c.clusterID
 
+	// Allocate ClusterSetIP if allocator is available and IP not already set
+	if c.clusterSetIPAllocator != nil && export.Status.ClusterSetIP == "" {
+		// Use the source namespace/name for allocation key
+		clusterSetIP, err := c.clusterSetIPAllocator.AllocateIP(
+			export.Spec.ServiceNamespace,
+			export.Spec.ServiceName,
+		)
+		if err != nil {
+			klog.Errorf("Failed to allocate ClusterSetIP for %s/%s: %v",
+				export.Spec.ServiceNamespace, export.Spec.ServiceName, err)
+		} else {
+			export.Status.ClusterSetIP = clusterSetIP
+			klog.Infof("Allocated ClusterSetIP %s for service %s/%s",
+				clusterSetIP, export.Spec.ServiceNamespace, export.Spec.ServiceName)
+		}
+	}
+
 	// Try to get existing ServiceExport
 	existing, err := c.brokerClient.BrokerV1alpha1().ServiceExports(c.namespace).Get(ctx, export.Name, metav1.GetOptions{})
 	if err == nil {
-		// Update existing
+		// Update existing - need to update spec and status separately
+		// because status is a subresource
 		export.ResourceVersion = existing.ResourceVersion
-		_, err = c.brokerClient.BrokerV1alpha1().ServiceExports(c.namespace).Update(ctx, export, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to update ServiceExport: %w", err)
+
+		// Preserve existing ClusterSetIP if not set in new export
+		if export.Status.ClusterSetIP == "" && existing.Status.ClusterSetIP != "" {
+			export.Status.ClusterSetIP = existing.Status.ClusterSetIP
 		}
+
+		// Update spec
+		updated, err := c.brokerClient.BrokerV1alpha1().ServiceExports(c.namespace).Update(ctx, export, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to update ServiceExport spec: %w", err)
+		}
+
+		// Update status
+		export.ResourceVersion = updated.ResourceVersion
+		_, err = c.brokerClient.BrokerV1alpha1().ServiceExports(c.namespace).UpdateStatus(ctx, export, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to update ServiceExport status: %w", err)
+		}
+
 		klog.V(4).Infof("Updated ServiceExport %s", export.Name)
 		return nil
 	}
 
 	// Create new
-	_, err = c.brokerClient.BrokerV1alpha1().ServiceExports(c.namespace).Create(ctx, export, metav1.CreateOptions{})
+	created, err := c.brokerClient.BrokerV1alpha1().ServiceExports(c.namespace).Create(ctx, export, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to create ServiceExport: %w", err)
 	}
+
+	// Update status after creation
+	export.ResourceVersion = created.ResourceVersion
+	_, err = c.brokerClient.BrokerV1alpha1().ServiceExports(c.namespace).UpdateStatus(ctx, export, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update ServiceExport status after creation: %w", err)
+	}
+
 	klog.V(4).Infof("Created ServiceExport %s", export.Name)
 	return nil
 }

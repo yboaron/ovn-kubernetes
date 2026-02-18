@@ -244,6 +244,14 @@ var (
 		V6TransitSubnet: "fd97::/64",
 	}
 
+	// MCS holds Multi-Cluster Services configuration
+	MCS = MCSConfig{
+		Enabled:         false,
+		ClusterID:       "",
+		BrokerKubeconfig: "",
+		BrokerNamespace: "ovn-kubernetes-broker",
+	}
+
 	// NoOverlay holds no-overlay mode configuration
 	NoOverlay = NoOverlayConfig{}
 
@@ -652,6 +660,21 @@ type ClusterManagerConfig struct {
 	V6TransitSubnet string `gcfg:"v6-transit-subnet"`
 }
 
+// MCSConfig holds configuration for Multi-Cluster Services
+type MCSConfig struct {
+	// Enabled indicates whether MCS is enabled
+	Enabled bool `gcfg:"enabled"`
+	// ClusterID is the unique identifier for this cluster
+	ClusterID string `gcfg:"cluster-id"`
+	// BrokerKubeconfig is the path to the kubeconfig file for accessing the broker cluster
+	BrokerKubeconfig string `gcfg:"broker-kubeconfig"`
+	// BrokerNamespace is the namespace in the broker cluster where MCS resources are stored
+	BrokerNamespace string `gcfg:"broker-namespace"`
+	// ClusterSetIPCIDR is the CIDR range for ClusterSet-scoped IPs (e.g., 242.0.0.0/16)
+	// If set, this cluster will act as the ClusterSetIP allocator
+	ClusterSetIPCIDR string `gcfg:"clusterset-ip-cidr"`
+}
+
 // NoOverlayConfig holds configuration for no-overlay mode
 type NoOverlayConfig struct {
 	// OutboundSNAT configures SNAT behavior for outbound traffic from pods on the default network.
@@ -708,6 +731,7 @@ type config struct {
 	HybridOverlay        HybridOverlayConfig
 	OvnKubeNode          OvnKubeNodeConfig
 	ClusterManager       ClusterManagerConfig
+	MCS                  MCSConfig
 	OvsPaths             OvsPathConfig
 	NoOverlay            NoOverlayConfig  `gcfg:"no-overlay"`
 	ManagedBGP           ManagedBGPConfig `gcfg:"bgp-managed"`
@@ -730,6 +754,7 @@ var (
 	savedHybridOverlay        HybridOverlayConfig
 	savedOvnKubeNode          OvnKubeNodeConfig
 	savedClusterManager       ClusterManagerConfig
+	savedMCS                  MCSConfig
 	savedOvsPaths             OvsPathConfig
 	savedNoOverlay            NoOverlayConfig
 	savedManagedBGP           ManagedBGPConfig
@@ -762,6 +787,7 @@ func init() {
 	savedHybridOverlay = HybridOverlay
 	savedOvnKubeNode = OvnKubeNode
 	savedClusterManager = ClusterManager
+	savedMCS = MCS
 	savedOvsPaths = OvsPaths
 	savedNoOverlay = NoOverlay
 	savedManagedBGP = ManagedBGP
@@ -795,6 +821,7 @@ func PrepareTestConfig() error {
 	HybridOverlay = savedHybridOverlay
 	OvnKubeNode = savedOvnKubeNode
 	ClusterManager = savedClusterManager
+	MCS = savedMCS
 	OvsPaths = savedOvsPaths
 	NoOverlay = savedNoOverlay
 	ManagedBGP = savedManagedBGP
@@ -1850,6 +1877,40 @@ var ClusterManagerFlags = []cli.Flag{
 	},
 }
 
+// MCSFlags captures Multi-Cluster Services configurations
+var MCSFlags = []cli.Flag{
+	&cli.BoolFlag{
+		Name:        "mcs-enable",
+		Usage:       "Enable Multi-Cluster Services (MCS) controller",
+		Destination: &cliConfig.MCS.Enabled,
+		Value:       MCS.Enabled,
+	},
+	&cli.StringFlag{
+		Name:        "mcs-cluster-id",
+		Usage:       "Unique identifier for this cluster in the MCS broker",
+		Destination: &cliConfig.MCS.ClusterID,
+		Value:       MCS.ClusterID,
+	},
+	&cli.StringFlag{
+		Name:        "mcs-broker-kubeconfig",
+		Usage:       "Path to kubeconfig file for accessing the MCS broker cluster",
+		Destination: &cliConfig.MCS.BrokerKubeconfig,
+		Value:       MCS.BrokerKubeconfig,
+	},
+	&cli.StringFlag{
+		Name:        "mcs-broker-namespace",
+		Usage:       "Namespace in the broker cluster where MCS resources are stored",
+		Destination: &cliConfig.MCS.BrokerNamespace,
+		Value:       MCS.BrokerNamespace,
+	},
+	&cli.StringFlag{
+		Name:        "mcs-clusterset-ip-cidr",
+		Usage:       "CIDR range for ClusterSet-scoped IPs (e.g., 242.0.0.0/16). If set, this cluster will allocate ClusterSetIPs.",
+		Destination: &cliConfig.MCS.ClusterSetIPCIDR,
+		Value:       MCS.ClusterSetIPCIDR,
+	},
+}
+
 // OvsPathsFlags capture OVS path configuration options
 var OvsPathsFlags = []cli.Flag{
 	&cli.StringFlag{
@@ -1882,6 +1943,7 @@ func GetFlags(customFlags []cli.Flag) []cli.Flag {
 	flags = append(flags, IPFIXFlags...)
 	flags = append(flags, OvnKubeNodeFlags...)
 	flags = append(flags, ClusterManagerFlags...)
+	flags = append(flags, MCSFlags...)
 	flags = append(flags, OvsPathsFlags...)
 	flags = append(flags, customFlags...)
 	return flags
@@ -2420,6 +2482,16 @@ func buildClusterManagerConfig(cli, file *config) error {
 		return err
 	}
 
+	// MCS config from config file
+	if err := overrideFields(&MCS, &file.MCS, &savedMCS); err != nil {
+		return err
+	}
+
+	// And CLI overrides over config file and default values
+	if err := overrideFields(&MCS, &cli.MCS, &savedMCS); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -2695,6 +2767,7 @@ func initConfigWithPath(ctx *cli.Context, exec kexec.Interface, saPath string, d
 		HybridOverlay:        savedHybridOverlay,
 		OvnKubeNode:          savedOvnKubeNode,
 		ClusterManager:       savedClusterManager,
+		MCS:                  savedMCS,
 		OvsPaths:             savedOvsPaths,
 		NoOverlay:            savedNoOverlay,
 		ManagedBGP:           savedManagedBGP,

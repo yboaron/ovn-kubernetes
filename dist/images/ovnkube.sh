@@ -2601,6 +2601,36 @@ ovn-cluster-manager() {
       advertised_udn_isolation_flag="--advertised-udn-isolation-mode=${ovn_advertised_udn_isolation_mode}"
   fi
 
+  mcs_enabled_flag=
+  if [[ ${MCS_ENABLE} == "true" ]]; then
+      mcs_enabled_flag="--mcs-enable=true"
+  fi
+  echo "mcs_enabled_flag=${mcs_enabled_flag}"
+
+  mcs_cluster_id_flag=
+  if [[ -n ${MCS_CLUSTER_ID} ]]; then
+      mcs_cluster_id_flag="--mcs-cluster-id=${MCS_CLUSTER_ID}"
+  fi
+  echo "mcs_cluster_id_flag=${mcs_cluster_id_flag}"
+
+  mcs_broker_kubeconfig_flag=
+  if [[ -n ${MCS_BROKER_KUBECONFIG} ]]; then
+      mcs_broker_kubeconfig_flag="--mcs-broker-kubeconfig=${MCS_BROKER_KUBECONFIG}"
+  fi
+  echo "mcs_broker_kubeconfig_flag=${mcs_broker_kubeconfig_flag}"
+
+  mcs_broker_namespace_flag=
+  if [[ -n ${MCS_BROKER_NAMESPACE} ]]; then
+      mcs_broker_namespace_flag="--mcs-broker-namespace=${MCS_BROKER_NAMESPACE}"
+  fi
+  echo "mcs_broker_namespace_flag=${mcs_broker_namespace_flag}"
+
+  mcs_clusterset_ip_cidr_flag=
+  if [[ -n ${MCS_CLUSTERSET_IP_CIDR} ]]; then
+      mcs_clusterset_ip_cidr_flag="--mcs-clusterset-ip-cidr=${MCS_CLUSTERSET_IP_CIDR}"
+  fi
+  echo "mcs_clusterset_ip_cidr_flag=${mcs_clusterset_ip_cidr_flag}"
+
   ovnkube_config_file_flag="--config-file=/run/ovnkube-config/ovnkube.conf"
   echo "ovnkube_config_file_flag=${ovnkube_config_file_flag}"
 
@@ -2682,6 +2712,11 @@ ovn-cluster-manager() {
     ${route_advertisements_enabled_flag} \
     ${evpn_enabled_flag} \
     ${advertised_udn_isolation_flag} \
+    ${mcs_enabled_flag} \
+    ${mcs_cluster_id_flag} \
+    ${mcs_broker_kubeconfig_flag} \
+    ${mcs_broker_namespace_flag} \
+    ${mcs_clusterset_ip_cidr_flag} \
     ${ovnkube_config_file_flag} \
     ${persistent_ips_enabled_flag} \
     ${ovnkube_enable_interconnect_flag} \

@@ -7,6 +7,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	discoverylisters "k8s.io/client-go/listers/discovery/v1"
@@ -15,6 +18,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager/broker"
 	brokerv1alpha1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/ovnbroker/v1alpha1"
 	cudnlisters "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/listers/userdefinednetwork/v1"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	mcsv1alpha1 "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
 )
 
@@ -66,6 +70,17 @@ func NewHandler(config *HandlerConfig) *Handler {
 		klog.V(2).Info("Created default CUDN provider for MCS handler")
 	}
 
+	// Log if any listers are nil
+	if config.ServiceLister == nil {
+		klog.Warning("MCS Handler: ServiceLister is nil")
+	}
+	if config.EndpointSliceLister == nil {
+		klog.Warning("MCS Handler: EndpointSliceLister is nil")
+	}
+	if config.NamespaceLister == nil {
+		klog.Warning("MCS Handler: NamespaceLister is nil")
+	}
+
 	h := &Handler{
 		agent:               config.Agent,
 		serviceLister:       config.ServiceLister,
@@ -79,6 +94,18 @@ func NewHandler(config *HandlerConfig) *Handler {
 	// Create exporter and importer
 	h.exporter = NewExporter(h)
 	h.importer = NewImporter(h)
+
+	// Create ClusterSetIP allocator if this is the broker cluster
+	// Check if the agent has ClusterSetIPCIDR configured
+	if cidr := config.Agent.ClusterSetIPCIDR(); cidr != "" {
+		allocator, err := NewClusterSetIPAllocator(cidr)
+		if err != nil {
+			klog.Errorf("Failed to create ClusterSetIP allocator: %v", err)
+		} else {
+			config.Agent.BrokerClient().SetClusterSetIPAllocator(allocator)
+			klog.Infof("Created ClusterSetIP allocator for CIDR: %s", cidr)
+		}
+	}
 
 	return h
 }
@@ -114,21 +141,44 @@ func (h *Handler) GetWatchedResources() []broker.WatchedResource {
 	}
 }
 
+// convertToServiceExport converts an unstructured object to a ServiceExport.
+func convertToServiceExport(obj interface{}) (*mcsv1alpha1.ServiceExport, error) {
+	// Try direct type assertion first
+	if export, ok := obj.(*mcsv1alpha1.ServiceExport); ok {
+		return export, nil
+	}
+
+	// Try unstructured conversion
+	unstructuredObj, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return nil, fmt.Errorf("unexpected type %T, expected *mcsv1alpha1.ServiceExport or *unstructured.Unstructured", obj)
+	}
+
+	export := &mcsv1alpha1.ServiceExport{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredObj.Object, export); err != nil {
+		return nil, fmt.Errorf("failed to convert unstructured to ServiceExport: %w", err)
+	}
+
+	return export, nil
+}
+
 // OnLocalAdd implements broker.Handler - handles local ServiceExport creation
 func (h *Handler) OnLocalAdd(obj interface{}) error {
-	export, ok := obj.(*mcsv1alpha1.ServiceExport)
-	if !ok {
+	export, err := convertToServiceExport(obj)
+	if err != nil {
+		klog.Warningf("MCS handler: OnLocalAdd conversion failed: %v", err)
 		return nil
 	}
 
-	klog.V(4).Infof("MCS handler: ServiceExport added: %s/%s", export.Namespace, export.Name)
+	klog.Infof("MCS handler: ServiceExport added: %s/%s", export.Namespace, export.Name)
 	return h.exporter.ExportService(export)
 }
 
 // OnLocalUpdate implements broker.Handler - handles local ServiceExport updates
 func (h *Handler) OnLocalUpdate(oldObj, newObj interface{}) error {
-	export, ok := newObj.(*mcsv1alpha1.ServiceExport)
-	if !ok {
+	export, err := convertToServiceExport(newObj)
+	if err != nil {
+		klog.Warningf("MCS handler: OnLocalUpdate conversion failed: %v", err)
 		return nil
 	}
 
@@ -138,8 +188,9 @@ func (h *Handler) OnLocalUpdate(oldObj, newObj interface{}) error {
 
 // OnLocalDelete implements broker.Handler - handles local ServiceExport deletion
 func (h *Handler) OnLocalDelete(obj interface{}) error {
-	export, ok := obj.(*mcsv1alpha1.ServiceExport)
-	if !ok {
+	export, err := convertToServiceExport(obj)
+	if err != nil {
+		klog.Warningf("MCS handler: OnLocalDelete conversion failed: %v", err)
 		return nil
 	}
 
@@ -235,18 +286,26 @@ func (h *Handler) getNamespace(name string) (*corev1.Namespace, error) {
 
 // Helper method to list endpoint slices for a service
 func (h *Handler) listEndpointSlices(namespace, serviceName string) ([]*discoveryv1.EndpointSlice, error) {
-	// In real implementation, would use label selector
-	// For now, simplified version
-	allSlices, err := h.endpointSliceLister.EndpointSlices(namespace).List(nil)
+	// Use the Kubernetes client directly since the lister may not be initialized
+	// for cluster manager (which doesn't watch EndpointSlices by default)
+	//
+	// For CUDN services, mirrored EndpointSlices use the label "k8s.ovn.org/service-name"
+	// instead of the standard "kubernetes.io/service-name"
+	labelSelector := fmt.Sprintf("%s=%s", types.LabelUserDefinedServiceName, serviceName)
+
+	sliceList, err := h.agent.LocalKubeClient().DiscoveryV1().EndpointSlices(namespace).List(
+		context.TODO(),
+		metav1.ListOptions{
+			LabelSelector: labelSelector,
+		},
+	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to list EndpointSlices: %w", err)
 	}
 
 	var slices []*discoveryv1.EndpointSlice
-	for _, slice := range allSlices {
-		if slice.Labels[discoveryv1.LabelServiceName] == serviceName {
-			slices = append(slices, slice)
-		}
+	for i := range sliceList.Items {
+		slices = append(slices, &sliceList.Items[i])
 	}
 
 	return slices, nil
