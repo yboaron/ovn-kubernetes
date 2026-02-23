@@ -8,6 +8,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
+	mcsclientset "sigs.k8s.io/mcs-api/pkg/client/clientset/versioned"
 
 	brokerv1alpha1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/ovnbroker/v1alpha1"
 	brokerclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/ovnbroker/v1alpha1/apis/clientset/versioned"
@@ -56,6 +57,7 @@ type Agent struct {
 	config            *AgentConfig
 	brokerClient      *Client
 	localBrokerClient brokerclientset.Interface
+	localMCSClient    mcsclientset.Interface
 	handlers          []Handler
 	syncer            *Syncer
 
@@ -92,6 +94,12 @@ func NewAgent(config *AgentConfig) (*Agent, error) {
 		return nil, fmt.Errorf("failed to create local broker clientset: %w", err)
 	}
 
+	// Create local MCS clientset for standard multicluster.x-k8s.io API
+	localMCSClient, err := mcsclientset.NewForConfig(config.LocalKubeConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create local MCS clientset: %w", err)
+	}
+
 	// Create ClusterSetIP allocator if CIDR is provided
 	// This cluster will act as the ClusterSetIP allocator for the broker
 	if config.ClusterSetIPCIDR != "" {
@@ -107,6 +115,7 @@ func NewAgent(config *AgentConfig) (*Agent, error) {
 		config:            config,
 		brokerClient:      brokerClient,
 		localBrokerClient: localBrokerClient,
+		localMCSClient:    localMCSClient,
 		handlers:          []Handler{},
 		ctx:               ctx,
 		cancel:            cancel,
@@ -140,6 +149,11 @@ func (a *Agent) LocalKubeClient() kubernetes.Interface {
 // LocalBrokerClient returns the local broker CRD clientset.
 func (a *Agent) LocalBrokerClient() brokerclientset.Interface {
 	return a.localBrokerClient
+}
+
+// LocalMCSClient returns the local MCS API clientset for multicluster.x-k8s.io resources.
+func (a *Agent) LocalMCSClient() mcsclientset.Interface {
+	return a.localMCSClient
 }
 
 // ClusterID returns the cluster identifier.
