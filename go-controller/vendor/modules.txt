@@ -1382,6 +1382,9 @@ sigs.k8s.io/knftables
 # sigs.k8s.io/mcs-api v0.1.0
 ## explicit; go 1.14
 sigs.k8s.io/mcs-api/pkg/apis/v1alpha1
+sigs.k8s.io/mcs-api/pkg/client/clientset/versioned
+sigs.k8s.io/mcs-api/pkg/client/clientset/versioned/scheme
+sigs.k8s.io/mcs-api/pkg/client/clientset/versioned/typed/apis/v1alpha1
 # sigs.k8s.io/network-policy-api v0.1.5
 ## explicit; go 1.21
 sigs.k8s.io/network-policy-api/apis/v1alpha1
