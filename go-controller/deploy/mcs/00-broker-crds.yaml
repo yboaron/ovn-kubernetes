@@ -50,14 +50,11 @@ spec:
                 type: array
                 items:
                   type: string
-                description: Global CIDR for Globalnet-style NAT
+                description: Global pod CIDR range(s) for UDN/CUDN networks
               networks:
                 type: array
-                description: CUDN network information
                 items:
                   type: object
-                  required:
-                  - name
                   properties:
                     name:
                       type: string
@@ -65,28 +62,7 @@ spec:
                       type: array
                       items:
                         type: string
-                    topology:
-                      type: string
-                      enum: [Layer2, Layer3, Localnet]
-                    transport:
-                      type: string
-                      enum: [NoOverlay, Geneve, EVPN]
-                    evpn:
-                      type: object
-                      properties:
-                        ipvrfVNI:
-                          type: integer
-                          format: int32
-                        ipvrfRouteTarget:
-                          type: string
-                        macvrfVNI:
-                          type: integer
-                          format: int32
-                        macvrfRouteTarget:
-                          type: string
-                        asn:
-                          type: integer
-                          format: int32
+                description: UDN/CUDN network information
           status:
             type: object
             properties:
@@ -127,7 +103,7 @@ spec:
     storage: true
     schema:
       openAPIV3Schema:
-        description: ServiceExport represents a service exported to the broker.
+        description: ServiceExport represents a service exported from a member cluster to the broker.
         type: object
         properties:
           apiVersion:
@@ -144,8 +120,10 @@ spec:
             properties:
               serviceName:
                 type: string
+                description: Name of the exported service
               serviceNamespace:
                 type: string
+                description: Namespace of the exported service
               ports:
                 type: array
                 items:
@@ -160,23 +138,23 @@ spec:
                       format: int32
                     appProtocol:
                       type: string
+                description: Ports exposed by the service
           status:
             type: object
             properties:
               clusterID:
                 type: string
+                description: ID of the cluster exporting this service
               networkName:
                 type: string
-                description: CUDN network name
+                description: UDN network name for this service
               clusterSetIP:
                 type: string
-                description: Allocated ClusterSet-scoped VIP
+                description: ClusterSet-scoped IP allocated for this service
               endpoints:
                 type: array
                 items:
                   type: object
-                  required:
-                  - address
                   properties:
                     address:
                       type: string
@@ -188,105 +166,7 @@ spec:
                       type: string
                     ready:
                       type: boolean
-              conditions:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    type:
-                      type: string
-                    status:
-                      type: string
-                    lastTransitionTime:
-                      type: string
-                      format: date-time
-                    reason:
-                      type: string
-                    message:
-                      type: string
-    subresources:
-      status: {}
----
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  name: serviceimports.broker.ovn.org
-spec:
-  group: broker.ovn.org
-  names:
-    kind: ServiceImport
-    listKind: ServiceImportList
-    plural: serviceimports
-    singular: serviceimport
-  scope: Namespaced
-  versions:
-  - name: v1alpha1
-    served: true
-    storage: true
-    schema:
-      openAPIV3Schema:
-        description: ServiceImport represents an imported service.
-        type: object
-        properties:
-          apiVersion:
-            type: string
-          kind:
-            type: string
-          metadata:
-            type: object
-          spec:
-            type: object
-            properties:
-              type:
-                type: string
-                enum: [ClusterSetIP, Headless]
-              ips:
-                type: array
-                items:
-                  type: string
-              ports:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    name:
-                      type: string
-                    protocol:
-                      type: string
-                    port:
-                      type: integer
-                      format: int32
-                    appProtocol:
-                      type: string
-              sessionAffinity:
-                type: string
-                enum: [None, ClientIP]
-              sessionAffinityConfig:
-                type: object
-                properties:
-                  clientIP:
-                    type: object
-                    properties:
-                      timeoutSeconds:
-                        type: integer
-                        format: int32
-          status:
-            type: object
-            properties:
-              networkName:
-                type: string
-              clusters:
-                type: array
-                items:
-                  type: object
-                  required:
-                  - clusterID
-                  properties:
-                    clusterID:
-                      type: string
-                    endpointCount:
-                      type: integer
-                      format: int32
+                description: Service endpoints from the exporting cluster
               conditions:
                 type: array
                 items:

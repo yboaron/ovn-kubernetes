@@ -217,48 +217,59 @@ func (i *Importer) ensureService(namespace, serviceName string, brokerExport *br
 		},
 	}
 
-	// IMPORTANT: Store ClusterSetIP in annotation instead of Service.Spec.ClusterIP
-	// The ClusterSetIP is managed separately and OVN will create LB rules for it
+	// IMPORTANT: Use ClusterSetIP as the actual ClusterIP (not just annotation)
+	// This allows DNS to return the same IP across all clusters and enables
+	// future clusterset.local DNS extension support
 	if brokerExport.Status.ClusterSetIP != "" {
-		if service.Annotations == nil {
-			service.Annotations = make(map[string]string)
-		}
-		service.Annotations["multicluster.kubernetes.io/clusterset-ip"] = brokerExport.Status.ClusterSetIP
-		klog.Infof("Set ClusterSetIP annotation %s for imported service %s/%s",
+		service.Spec.ClusterIP = brokerExport.Status.ClusterSetIP
+		service.Spec.ClusterIPs = []string{brokerExport.Status.ClusterSetIP}
+		klog.Infof("Using ClusterSetIP %s as ClusterIP for imported service %s/%s",
 			brokerExport.Status.ClusterSetIP, namespace, serviceName)
 	} else {
-		klog.Warningf("No ClusterSetIP allocated for service %s/%s",
+		klog.Warningf("No ClusterSetIP allocated for service %s/%s, will use auto-assigned IP",
 			namespace, serviceName)
+		// Let Kubernetes assign a regular ClusterIP from the service CIDR
 	}
-	// Let Kubernetes assign a regular ClusterIP from the service CIDR
-	// service.Spec.ClusterIP remains unset (will be auto-assigned)
 
 	// Try to get existing Service
 	existing, err := i.handler.agent.LocalKubeClient().CoreV1().Services(namespace).Get(
 		context.TODO(), serviceName, metav1.GetOptions{})
 
 	if err == nil {
-		// Update existing Service
-		// Preserve ResourceVersion and ClusterIP (don't change ClusterIP once assigned)
+		// Check if this is an MCS-imported service or a local service
+		if existing.Labels["multicluster.kubernetes.io/imported"] != "true" {
+			// This is a LOCAL service, not an imported one - CONFLICT!
+			// In MCS spec, we should merge local and remote endpoints
+			// For now, skip import to avoid breaking local service
+			klog.Warningf("Service %s/%s already exists locally (not MCS-imported). Skipping import to avoid conflict. "+
+				"Consider implementing service aggregation per MCS spec.", namespace, serviceName)
+			return fmt.Errorf("naming conflict: service %s/%s exists locally (not imported)", namespace, serviceName)
+		}
+
+		// Update existing imported Service
+		// Preserve ResourceVersion but update ClusterIP if ClusterSetIP changed
 		service.ResourceVersion = existing.ResourceVersion
-		service.Spec.ClusterIP = existing.Spec.ClusterIP
-		service.Spec.ClusterIPs = existing.Spec.ClusterIPs
+		if brokerExport.Status.ClusterSetIP == "" {
+			// No ClusterSetIP, preserve existing ClusterIP
+			service.Spec.ClusterIP = existing.Spec.ClusterIP
+			service.Spec.ClusterIPs = existing.Spec.ClusterIPs
+		}
 		_, err = i.handler.agent.LocalKubeClient().CoreV1().Services(namespace).Update(
 			context.TODO(), service, metav1.UpdateOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to update Service: %w", err)
 		}
-		klog.V(4).Infof("Updated Service %s/%s for imported service (ClusterSetIP annotation: %s)",
-			namespace, serviceName, service.Annotations["multicluster.kubernetes.io/clusterset-ip"])
+		klog.V(4).Infof("Updated Service %s/%s for imported service (ClusterSetIP: %s)",
+			namespace, serviceName, brokerExport.Status.ClusterSetIP)
 	} else if apierrors.IsNotFound(err) {
-		// Create new Service (Kubernetes will auto-assign ClusterIP)
+		// Create new Service
 		_, err = i.handler.agent.LocalKubeClient().CoreV1().Services(namespace).Create(
 			context.TODO(), service, metav1.CreateOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to create Service: %w", err)
 		}
-		klog.Infof("Created Service %s/%s for imported service (ClusterSetIP annotation: %s)",
-			namespace, serviceName, service.Annotations["multicluster.kubernetes.io/clusterset-ip"])
+		klog.Infof("Created Service %s/%s for imported service (ClusterSetIP: %s)",
+			namespace, serviceName, brokerExport.Status.ClusterSetIP)
 	} else {
 		return fmt.Errorf("failed to get Service: %w", err)
 	}
