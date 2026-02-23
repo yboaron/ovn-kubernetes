@@ -37,15 +37,18 @@ func (i *Importer) ImportService(brokerExport *brokerv1alpha1.ServiceExport) err
 	serviceName := brokerExport.Spec.ServiceName
 	sourceCluster := brokerExport.Status.ClusterID
 
-	// 1. Create or update ServiceImport (using standard multicluster.x-k8s.io API)
-	if err := i.ensureServiceImport(namespace, serviceName, brokerExport); err != nil {
-		klog.Errorf("Failed to ensure ServiceImport: %v", err)
+	// 1. Create or update derived Service for the imported service
+	//    This will allocate a per-cluster ClusterSetIP from local service CIDR
+	clusterSetIP, err := i.ensureService(namespace, serviceName, brokerExport)
+	if err != nil {
+		klog.Errorf("Failed to ensure Service: %v", err)
 		return err
 	}
 
-	// 2. Create or update derived Service for the imported service
-	if err := i.ensureService(namespace, serviceName, brokerExport); err != nil {
-		klog.Errorf("Failed to ensure Service: %v", err)
+	// 2. Create or update ServiceImport with the allocated ClusterSetIP
+	//    Per MCS API spec, we use per-cluster ClusterSetIP allocation
+	if err := i.ensureServiceImport(namespace, serviceName, brokerExport, clusterSetIP); err != nil {
+		klog.Errorf("Failed to ensure ServiceImport: %v", err)
 		return err
 	}
 
@@ -55,8 +58,8 @@ func (i *Importer) ImportService(brokerExport *brokerv1alpha1.ServiceExport) err
 		return err
 	}
 
-	klog.Infof("Successfully imported service %s/%s from cluster %s (%d endpoints)",
-		namespace, serviceName, sourceCluster, len(brokerExport.Status.Endpoints))
+	klog.Infof("Successfully imported service %s/%s from cluster %s with ClusterSetIP %s (%d endpoints)",
+		namespace, serviceName, sourceCluster, clusterSetIP, len(brokerExport.Status.Endpoints))
 
 	return nil
 }
@@ -108,7 +111,7 @@ func (i *Importer) UnimportService(brokerExport *brokerv1alpha1.ServiceExport) e
 }
 
 // ensureServiceImport creates or updates a ServiceImport using the standard multicluster.x-k8s.io API.
-func (i *Importer) ensureServiceImport(namespace, serviceName string, brokerExport *brokerv1alpha1.ServiceExport) error {
+func (i *Importer) ensureServiceImport(namespace, serviceName string, brokerExport *brokerv1alpha1.ServiceExport, clusterSetIP string) error {
 	// Convert broker ports to MCS ServicePorts
 	var mcsPorts []mcsv1alpha1.ServicePort
 	for _, epPort := range brokerExport.Spec.Ports {
@@ -144,9 +147,10 @@ func (i *Importer) ensureServiceImport(namespace, serviceName string, brokerExpo
 		},
 	}
 
-	// Set ClusterSetIP if available
-	if brokerExport.Status.ClusterSetIP != "" {
-		serviceImport.Spec.IPs = []string{brokerExport.Status.ClusterSetIP}
+	// Per MCS API spec: "IPs may be used clusterset-wide or assigned on a per-cluster basis"
+	// We use per-cluster allocation - each cluster allocates its own ClusterSetIP from local service CIDR
+	if clusterSetIP != "" {
+		serviceImport.Spec.IPs = []string{clusterSetIP}
 	}
 
 	// Try to get existing ServiceImport (in local cluster using standard MCS API)
@@ -180,7 +184,8 @@ func (i *Importer) ensureServiceImport(namespace, serviceName string, brokerExpo
 
 // ensureService creates or updates a derived Service for the imported service.
 // This Service is required for OVN-K's service controller to create load balancer backends.
-func (i *Importer) ensureService(namespace, serviceName string, brokerExport *brokerv1alpha1.ServiceExport) error {
+// Returns the allocated ClusterSetIP (which is the Service's ClusterIP).
+func (i *Importer) ensureService(namespace, serviceName string, brokerExport *brokerv1alpha1.ServiceExport) (string, error) {
 	// Convert broker ports to Service ports
 	var servicePorts []corev1.ServicePort
 	for _, epPort := range brokerExport.Spec.Ports {
@@ -217,64 +222,59 @@ func (i *Importer) ensureService(namespace, serviceName string, brokerExport *br
 		},
 	}
 
-	// IMPORTANT: Use ClusterSetIP as the actual ClusterIP (not just annotation)
-	// This allows DNS to return the same IP across all clusters and enables
-	// future clusterset.local DNS extension support
-	if brokerExport.Status.ClusterSetIP != "" {
-		service.Spec.ClusterIP = brokerExport.Status.ClusterSetIP
-		service.Spec.ClusterIPs = []string{brokerExport.Status.ClusterSetIP}
-		klog.Infof("Using ClusterSetIP %s as ClusterIP for imported service %s/%s",
-			brokerExport.Status.ClusterSetIP, namespace, serviceName)
-	} else {
-		klog.Warningf("No ClusterSetIP allocated for service %s/%s, will use auto-assigned IP",
-			namespace, serviceName)
-		// Let Kubernetes assign a regular ClusterIP from the service CIDR
-	}
+	// Per-cluster ClusterSetIP allocation:
+	// Let Kubernetes auto-assign a ClusterIP from this cluster's service CIDR.
+	// This ClusterIP will become the per-cluster ClusterSetIP.
+	// Per MCS API spec: "IPs may be used clusterset-wide or assigned on a per-cluster basis"
+	// We use per-cluster allocation for simplicity (no centralized IP allocator needed).
+	// service.Spec.ClusterIP remains unset - will be auto-assigned
 
 	// Try to get existing Service
 	existing, err := i.handler.agent.LocalKubeClient().CoreV1().Services(namespace).Get(
 		context.TODO(), serviceName, metav1.GetOptions{})
 
+	var clusterSetIP string
+
 	if err == nil {
-		// Check if this is an MCS-imported service or a local service
+		// Service already exists - check if it's MCS-imported or local
 		if existing.Labels["multicluster.kubernetes.io/imported"] != "true" {
 			// This is a LOCAL service, not an imported one - CONFLICT!
 			// In MCS spec, we should merge local and remote endpoints
 			// For now, skip import to avoid breaking local service
 			klog.Warningf("Service %s/%s already exists locally (not MCS-imported). Skipping import to avoid conflict. "+
 				"Consider implementing service aggregation per MCS spec.", namespace, serviceName)
-			return fmt.Errorf("naming conflict: service %s/%s exists locally (not imported)", namespace, serviceName)
+			return "", fmt.Errorf("naming conflict: service %s/%s exists locally (not imported)", namespace, serviceName)
 		}
 
 		// Update existing imported Service
-		// Preserve ResourceVersion but update ClusterIP if ClusterSetIP changed
+		// Preserve ResourceVersion and ClusterIP (ClusterSetIP)
 		service.ResourceVersion = existing.ResourceVersion
-		if brokerExport.Status.ClusterSetIP == "" {
-			// No ClusterSetIP, preserve existing ClusterIP
-			service.Spec.ClusterIP = existing.Spec.ClusterIP
-			service.Spec.ClusterIPs = existing.Spec.ClusterIPs
-		}
+		service.Spec.ClusterIP = existing.Spec.ClusterIP
+		service.Spec.ClusterIPs = existing.Spec.ClusterIPs
+		clusterSetIP = existing.Spec.ClusterIP
+
 		_, err = i.handler.agent.LocalKubeClient().CoreV1().Services(namespace).Update(
 			context.TODO(), service, metav1.UpdateOptions{})
 		if err != nil {
-			return fmt.Errorf("failed to update Service: %w", err)
+			return "", fmt.Errorf("failed to update Service: %w", err)
 		}
 		klog.V(4).Infof("Updated Service %s/%s for imported service (ClusterSetIP: %s)",
-			namespace, serviceName, brokerExport.Status.ClusterSetIP)
+			namespace, serviceName, clusterSetIP)
 	} else if apierrors.IsNotFound(err) {
-		// Create new Service
-		_, err = i.handler.agent.LocalKubeClient().CoreV1().Services(namespace).Create(
+		// Create new Service - Kubernetes will auto-assign ClusterIP
+		created, err := i.handler.agent.LocalKubeClient().CoreV1().Services(namespace).Create(
 			context.TODO(), service, metav1.CreateOptions{})
 		if err != nil {
-			return fmt.Errorf("failed to create Service: %w", err)
+			return "", fmt.Errorf("failed to create Service: %w", err)
 		}
+		clusterSetIP = created.Spec.ClusterIP
 		klog.Infof("Created Service %s/%s for imported service (ClusterSetIP: %s)",
-			namespace, serviceName, brokerExport.Status.ClusterSetIP)
+			namespace, serviceName, clusterSetIP)
 	} else {
-		return fmt.Errorf("failed to get Service: %w", err)
+		return "", fmt.Errorf("failed to get Service: %w", err)
 	}
 
-	return nil
+	return clusterSetIP, nil
 }
 
 // ensureEndpointSlice creates or updates an EndpointSlice for remote endpoints.
