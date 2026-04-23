@@ -45,7 +45,7 @@ type ClusterUserDefinedNetworkSpec struct {
 	// +kubebuilder:validation:XValidation:rule="!has(self.transport) || self.transport != 'EVPN' || self.topology != 'Layer2' || (has(self.evpn) && has(self.evpn.macVRF))", message="spec.evpn.macVRF field is required for Layer2 topology when transport is 'EVPN'"
 	// +kubebuilder:validation:XValidation:rule="!has(self.transport) || self.transport != 'EVPN' || self.topology != 'Layer3' || (has(self.evpn) && has(self.evpn.ipVRF))", message="spec.evpn.ipVRF field is required for Layer3 topology when transport is 'EVPN'"
 	// +kubebuilder:validation:XValidation:rule="!has(self.transport) || self.transport != 'EVPN' || self.topology != 'Layer3' || !has(self.evpn) || !has(self.evpn.macVRF)", message="spec.evpn.macVRF field is forbidden for Layer3 topology when transport is 'EVPN'"
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf", message="Network spec is immutable"
+	// SKYNET: Allow patching EVPN config into existing CUDNs - removed immutability constraint
 	// +required
 	Network NetworkSpec `json:"network"`
 }
