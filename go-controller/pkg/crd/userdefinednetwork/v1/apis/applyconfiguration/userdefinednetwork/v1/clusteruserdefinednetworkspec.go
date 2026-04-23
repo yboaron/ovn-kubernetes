@@ -17,6 +17,7 @@ type ClusterUserDefinedNetworkSpecApplyConfiguration struct {
 	// NamespaceSelector Label selector for which namespace network should be available for.
 	NamespaceSelector *metav1.LabelSelectorApplyConfiguration `json:"namespaceSelector,omitempty"`
 	// Network is the user-defined-network spec
+	// SKYNET: Allow patching EVPN config into existing CUDNs - removed immutability constraint
 	Network *NetworkSpecApplyConfiguration `json:"network,omitempty"`
 }
 
