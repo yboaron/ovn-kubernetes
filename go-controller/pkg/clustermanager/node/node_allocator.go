@@ -426,12 +426,23 @@ func (na *NodeAllocator) Sync(nodes []interface{}) error {
 		} else {
 			hostSubnets, _ := util.ParseNodeHostSubnetAnnotation(node, networkName)
 			if len(hostSubnets) > 0 {
-				klog.V(5).Infof("Node %s contains subnets: %v for network : %s", node.Name, hostSubnets, networkName)
+				klog.V(5).Infof("Node %s contains subnets: %v for network: %s", node.Name, hostSubnets, networkName)
 				if err := na.clusterSubnetAllocator.MarkAllocatedNetworks(node.Name, hostSubnets...); err != nil {
 					klog.Errorf("Failed to mark the subnet %v as allocated in the cluster subnet allocator for node %s: %v", hostSubnets, node.Name, err)
 				}
 			} else {
-				klog.V(5).Infof("Node %s contains no subnets for network : %s", node.Name, networkName)
+				// Node exists but has no subnet annotation for this network - allocate and annotate it now
+				// This handles the case where:
+				// 1. CUDN created without EVPN transport
+				// 2. Network cluster controller created and Sync() called
+				// 3. Subnets allocated internally but annotations not written
+				// 4. EVPN transport added later (RouteAdvertisements need these annotations)
+				klog.Infof("Node %s has no subnet annotation for network %s during sync - allocating now", node.Name, networkName)
+				if err := na.syncNodeNetworkAnnotations(node); err != nil {
+					klog.Errorf("Failed to allocate and annotate node %s for network %s during sync: %v", node.Name, networkName, err)
+					continue
+				}
+				klog.V(4).Infof("Successfully allocated and annotated node %s for network %s during sync", node.Name, networkName)
 			}
 		}
 	}
