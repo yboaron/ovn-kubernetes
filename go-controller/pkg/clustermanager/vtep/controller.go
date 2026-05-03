@@ -178,32 +178,7 @@ func (c *Controller) syncManagedAllocators() error {
 			errs = append(errs, fmt.Errorf("VTEP %s: failed to create allocator: %w", vtep.Name, err))
 			continue
 		}
-		for _, node := range nodes {
-			nodeVTEPs, err := util.ParseNodeVTEPs(node)
-			if err != nil {
-				if !util.IsAnnotationNotSetError(err) {
-					klog.Warningf("VTEP %s: failed to parse annotation on node %s, skipping: %v", vtep.Name, node.Name, err)
-				}
-				continue
-			}
-			entry, ok := nodeVTEPs[vtep.Name]
-			if !ok || len(entry.IPs) == 0 {
-				klog.Warningf("VTEP %s: no existing allocation found on node %s, skipping", vtep.Name, node.Name)
-				continue
-			}
-			ips := make([]net.IP, 0, len(entry.IPs))
-			for _, ipStr := range entry.IPs {
-				ip := net.ParseIP(ipStr)
-				if ip == nil {
-					errs = append(errs, fmt.Errorf("VTEP %s: invalid IP %q in annotation on node %s", vtep.Name, ipStr, node.Name))
-					continue
-				}
-				ips = append(ips, ip)
-			}
-			if err := allocator.markAllocatedForNode(node.Name, ips); err != nil {
-				errs = append(errs, fmt.Errorf("VTEP %s: failed to mark IPs %v for node %s: %w", vtep.Name, ips, node.Name, err))
-			}
-		}
+		markExistingAllocationsFromNodes(vtep.Name, allocator, nodes)
 		c.allocatorsMu.Lock()
 		c.allocators[vtep.Name] = allocator
 		c.allocatorsMu.Unlock()
@@ -266,6 +241,37 @@ func (c *Controller) reconcileVTEP(key string) error {
 		}
 		return c.updateStatusCondition(vtep, conditionTypeAccepted, metav1.ConditionFalse,
 			reasonEVPNIPv6NotSupported, err.Error())
+	}
+
+	// When a VTEP transitions from Managed to Unmanaged, clean up the
+	// CM-written annotations and drop the allocator so the node-side
+	// controller can take over.
+	//
+	// Race with node-side during the cleanup window: the CM removes the VTEP
+	// entry from each node's annotation using RetryOnConflict+UpdateNodeStatus,
+	// while ovnkube-node concurrently writes its discovered IP using the same
+	// pattern (TODO: node-side should also use RetryOnConflict+UpdateNodeStatus;
+	// currently it uses strategic merge patch). Both sides may 409-conflict
+	// during cleanup. This is safe: the wasManaged guard ensures the CM only
+	// runs cleanup once per mode switch. After cleanup the allocator is gone so
+	// wasManaged is false on all subsequent reconciles, and the CM never touches
+	// the annotation again. Node-side eventually wins and the system converges.
+	// NOTE: Design isn't ideal but this is what happens when two processes share the
+	// same annotation resource. Moving modes is expected to be a rare operation so we
+	// can live with this.
+	if vtep.Spec.Mode != vtepv1.VTEPModeManaged {
+		c.allocatorsMu.Lock()
+		_, wasManaged := c.allocators[vtep.Name]
+		if wasManaged {
+			delete(c.allocators, vtep.Name)
+		}
+		c.allocatorsMu.Unlock()
+		if wasManaged {
+			klog.Infof("VTEP %s switched from Managed to Unmanaged, cleaning up annotations", vtep.Name)
+			if err := c.cleanupManagedVTEPAnnotations(vtep.Name); err != nil {
+				return fmt.Errorf("failed to clean up managed VTEP annotations for %s: %w", vtep.Name, err)
+			}
+		}
 	}
 
 	var allocationErr error
@@ -593,12 +599,29 @@ func (c *Controller) validateNodeVTEPIPs(vtep *vtepv1.VTEP) error {
 }
 
 // handleManagedMode ensures every node has an allocated VTEP IP and the
-// annotation is up to date. It creates the allocator lazily on first call
-// and allocates IPs for all current nodes.
+// annotation is up to date. Each reconcile does two things in order:
+//
+// NOTE: this iterates all nodes on every VTEP reconcile. At large scale
+// (e.g. 5000 nodes × 20 VTEPs) this is 100k in-memory lister lookups +
+// annotation parses per event burst, which is acceptable since the lister
+// is an in-memory cache and each parse is a small JSON unmarshal. Nodes
+// that already have the correct annotation are skipped via an early-exit
+// check, so no API calls are made for them. TODO: If scale becomes a concern, a
+// per-VTEP "pending nodes" set could reduce redundant work.
+//  1. getOrUpdateAllocator: get the existing allocator, create one if this is
+//     the first managed reconcile (e.g. Unmanaged->Managed switch), or update
+//     it if the CIDRs changed. On first creation, existing node annotations
+//     are immediately marked so in-range IPs are preserved within this same
+//     reconcile.
+//  2. allocateAndAnnotateNode for every node: for nodes whose IPs were
+//     successfully marked above, allocateForNode is idempotent and returns the
+//     same IP. For nodes with stale/out-of-range IPs (mark was skipped), a
+//     fresh IP is allocated and the annotation is overwritten -- all in this
+//     same reconcile, not deferred.
 func (c *Controller) handleManagedMode(vtep *vtepv1.VTEP) error {
-	allocator, err := c.getOrCreateAllocator(vtep)
+	allocator, err := c.getOrUpdateAllocator(vtep)
 	if err != nil {
-		return fmt.Errorf("failed to create allocator for VTEP %s: %w", vtep.Name, err)
+		return fmt.Errorf("failed to get/create allocator for VTEP %s: %w", vtep.Name, err)
 	}
 
 	nodes, err := c.nodeLister.List(labels.Everything())
@@ -615,20 +638,104 @@ func (c *Controller) handleManagedMode(vtep *vtepv1.VTEP) error {
 	return errors.Join(errs...)
 }
 
-// getOrCreateAllocator returns the existing allocator for this VTEP or creates
-// a new one from the VTEP's CIDRs.
-func (c *Controller) getOrCreateAllocator(vtep *vtepv1.VTEP) (*vtepIPAllocator, error) {
+// markExistingAllocationsFromNodes reads node annotations and marks any
+// existing IPs for vtepName in the allocator so they are not reassigned.
+// IPs that are out of range (e.g. stale after a CIDR change while the CM was
+// down) are skipped with a warning. The caller (handleManagedMode) will
+// allocate a fresh IP and overwrite the stale annotation for those nodes
+// within the same reconcile.
+func markExistingAllocationsFromNodes(vtepName string, allocator *vtepIPAllocator, nodes []*corev1.Node) {
+	for _, node := range nodes {
+		nodeVTEPs, err := util.ParseNodeVTEPs(node)
+		if err != nil {
+			if !util.IsAnnotationNotSetError(err) {
+				klog.Warningf("VTEP %s: failed to parse annotation on node %s, skipping: %v", vtepName, node.Name, err)
+			}
+			continue
+		}
+		entry, ok := nodeVTEPs[vtepName]
+		if !ok || len(entry.IPs) == 0 {
+			continue
+		}
+		ips := make([]net.IP, 0, len(entry.IPs))
+		for _, ipStr := range entry.IPs {
+			ip := net.ParseIP(ipStr)
+			if ip == nil {
+				klog.Warningf("VTEP %s: invalid IP %q in annotation on node %s, skipping", vtepName, ipStr, node.Name)
+				continue
+			}
+			ips = append(ips, ip)
+		}
+		if err := allocator.markAllocatedForNode(node.Name, ips); err != nil {
+			// IP is out of the current CIDR range (e.g. CIDRs changed while
+			// CM was down). Warn and skip -- handleManagedMode will allocate
+			// a fresh IP and overwrite the stale annotation.
+			klog.Warningf("VTEP %s: could not mark IPs %v for node %s (possibly stale after CIDR change): %v", vtepName, ips, node.Name, err)
+		}
+	}
+}
+
+// getOrUpdateAllocator returns the allocator for this VTEP, creating it if
+// it doesn't exist (e.g. first reconcile or mode switch from Unmanaged) or
+// updating it when CIDRs have changed (append or widen).
+//
+// On first creation, existing node annotations are marked in the allocator so
+// that IPs written by the node-side controller during Unmanaged phase are
+// preserved rather than reassigned.
+//
+// On CIDR change, new CIDRs are appended and widened CIDRs are replaced
+// in-place. Since CEL rules guarantee CIDRs can only be appended or widened
+// in managed mode, existing allocations always remain valid.
+func (c *Controller) getOrUpdateAllocator(vtep *vtepv1.VTEP) (*vtepIPAllocator, error) {
 	c.allocatorsMu.Lock()
 	defer c.allocatorsMu.Unlock()
-	if a, ok := c.allocators[vtep.Name]; ok {
+
+	existing, ok := c.allocators[vtep.Name]
+	if !ok {
+		// First time seeing this VTEP in managed mode (fresh start or
+		// Unmanaged->Managed switch). Create allocator and mark any existing
+		// node annotations so we don't reassign IPs already in use.
+		a, err := newVTEPIPAllocator(vtep.Spec.CIDRs)
+		if err != nil {
+			return nil, err
+		}
+		nodes, err := c.nodeLister.List(labels.Everything())
+		if err != nil {
+			return nil, fmt.Errorf("failed to list nodes: %w", err)
+		}
+		markExistingAllocationsFromNodes(vtep.Name, a, nodes)
+		c.allocators[vtep.Name] = a
 		return a, nil
 	}
-	a, err := newVTEPIPAllocator(vtep.Spec.CIDRs)
-	if err != nil {
-		return nil, err
+
+	if existing.cidrsMatch(vtep.Spec.CIDRs) {
+		return existing, nil
 	}
-	c.allocators[vtep.Name] = a
-	return a, nil
+
+	// CIDRs have changed. CEL guarantees only appends and widenings are
+	// allowed in managed mode, so:
+	//  - indices < len(existing.cidrs): check if widened, replace if so
+	//  - indices >= len(existing.cidrs): new CIDRs, append them
+	klog.Infof("VTEP %s: CIDRs changed, updating allocator", vtep.Name)
+	for i, newCIDR := range vtep.Spec.CIDRs {
+		if i < len(existing.cidrs) {
+			if existing.cidrs[i] == newCIDR {
+				continue
+			}
+			// Existing CIDR was widened.
+			if err := existing.replaceRange(i, existing.cidrs[i], newCIDR); err != nil {
+				return nil, fmt.Errorf("failed to replace CIDR %q with %q: %w", existing.cidrs[i], newCIDR, err)
+			}
+			klog.Infof("VTEP %s: widened CIDR[%d] from %s to %s", vtep.Name, i, existing.cidrs[i], newCIDR)
+		} else {
+			// New CIDR appended to the spec.
+			if err := existing.addCIDR(newCIDR); err != nil {
+				return nil, fmt.Errorf("failed to add new CIDR %q: %w", newCIDR, err)
+			}
+			klog.Infof("VTEP %s: appended new CIDR %s", vtep.Name, newCIDR)
+		}
+	}
+	return existing, nil
 }
 
 // allocateAndAnnotateNode allocates a VTEP IP for the node and writes the
@@ -780,13 +887,35 @@ func cudnNeedsUpdate(oldObj, newObj *udnv1.ClusterUserDefinedNetwork) bool {
 // (or on node create/delete). It re-queues all VTEPs so validateNodeVTEPIPs
 // can re-validate VTEP IPs for the affected node.
 //
+// On node delete, the node is absent from the lister. For managed-mode VTEPs
+// we release the node's allocation so the IP can be reused by a future node.
+//
 // NOTE: currently we re-queue all VTEPs because every node participates in
 // every VTEP (FRR runs on all nodes). If partial VTEP participation is
 // supported in the future, we could compare the node's IPs against each
 // VTEP's CIDRs and only re-queue overlapping VTEPs.
-func (c *Controller) reconcileNode(_ string) error {
+func (c *Controller) reconcileNode(nodeName string) error {
+	_, err := c.nodeLister.Get(nodeName)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			c.releaseNodeFromAllocators(nodeName)
+		} else {
+			klog.Warningf("Failed to get node %s during reconcile: %v", nodeName, err)
+		}
+	}
 	c.vtepController.ReconcileAll()
 	return nil
+}
+
+// releaseNodeFromAllocators frees the node's IP allocation from all managed
+// VTEP allocators so the IP can be reused by a new node.
+func (c *Controller) releaseNodeFromAllocators(nodeName string) {
+	c.allocatorsMu.Lock()
+	defer c.allocatorsMu.Unlock()
+	for vtepName, allocator := range c.allocators {
+		allocator.releaseNode(nodeName)
+		klog.V(4).Infof("Released VTEP %s allocation for deleted node %s", vtepName, nodeName)
+	}
 }
 
 // nodeNeedsUpdate triggers VTEP reconciliation on node creates and when the
